@@ -2829,6 +2829,10 @@ static bool view_ram_info(void)
 #endif
 
 /****** The menu *********/
+#if defined(EROS_QN) && !defined(SIMULATOR) && !defined(BOOTLOADER)
+extern bool dbg_bt_diag(void);
+#endif
+
 static const struct {
     unsigned char *desc; /* string or ID */
     bool (*function) (void); /* return true if USB was connected */
@@ -2879,6 +2883,9 @@ static const struct {
         { "Skin Engine RAM usage", dbg_skin_engine },
 #if ((CONFIG_PLATFORM & PLATFORM_NATIVE) || defined(SONY_NWZ_LINUX) || defined(HIBY_LINUX) || defined(FIIO_M3K_LINUX)) && !defined(SIMULATOR)
         { "View HW info", dbg_hw_info },
+#endif
+#if defined(EROS_QN) && !defined(SIMULATOR)
+        { "BT Diagnostic", dbg_bt_diag },
 #endif
 #if (CONFIG_PLATFORM & PLATFORM_NATIVE)
         { "View partitions", dbg_partitions },
