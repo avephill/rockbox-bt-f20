@@ -2831,6 +2831,7 @@ static bool view_ram_info(void)
 /****** The menu *********/
 #if defined(EROS_QN) && !defined(SIMULATOR) && !defined(BOOTLOADER)
 extern bool dbg_bt_diag(void);
+extern bool dbg_bt_inquiry(void);
 #endif
 
 static const struct {
@@ -2886,6 +2887,7 @@ static const struct {
 #endif
 #if defined(EROS_QN) && !defined(SIMULATOR)
         { "BT Diagnostic", dbg_bt_diag },
+        { "BT Inquiry",    dbg_bt_inquiry },
 #endif
 #if (CONFIG_PLATFORM & PLATFORM_NATIVE)
         { "View partitions", dbg_partitions },

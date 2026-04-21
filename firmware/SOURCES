@@ -1827,6 +1827,7 @@ drivers/btstack/src/btstack_run_loop.c
 drivers/btstack/src/ad_parser.c
 drivers/btstack/src/classic/sdp_util.c
 drivers/btstack/platform/embedded/btstack_run_loop_embedded.c
+drivers/btstack/platform/embedded/btstack_uart_block_embedded.c
 #endif
 target/mips/ingenic_x1000/spl-nand-x1000.c
 #endif /* EROS_QN */

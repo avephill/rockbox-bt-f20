@@ -21,6 +21,20 @@
 #include "bt-erosqnative.h"
 #include "bt-bcm-patchram.h"
 
+#include "hci.h"
+#include "hci_cmd.h"
+#include "gap.h"
+#include "btstack_memory.h"
+#include "btstack_event.h"
+#include "btstack_run_loop.h"
+#include "btstack_run_loop_embedded.h"
+#include "hci_transport.h"
+#include "hci_transport_h4.h"
+#include "btstack_uart.h"
+#include "hal_uart_dma.h"
+
+extern const btstack_uart_t * btstack_uart_block_embedded_instance(void);
+
 static void putline(int* row, const char* s)
 {
     lcd_puts(0, (*row)++, s);
@@ -130,6 +144,129 @@ bool dbg_bt_diag(void)
 done:
     bt_hw_power(false);
     putline(&row, "---");
+    lcd_puts(0, 15, "POWER to exit");
+    lcd_update();
+    while(get_action(CONTEXT_STD, HZ) != ACTION_STD_CANCEL);
+    return false;
+}
+
+/* ============================================================================
+ * BTstack inquiry demo — next step: get BTstack to do HCI inquiry on top of
+ * our transport. This exercises: hal_uart_dma, btstack_uart_block_embedded,
+ * hci_transport_h4, hci core, gap inquiry.
+ * ============================================================================ */
+
+static int  s_row;
+static int  s_found;
+static bool s_done;
+
+static void print_evt(const char* s)
+{
+    if(s_row < 14) {
+        lcd_puts(0, s_row++, s);
+        lcd_update();
+    }
+}
+
+static void inquiry_packet_handler(uint8_t packet_type, uint16_t channel,
+                                   uint8_t* packet, uint16_t size)
+{
+    (void)channel; (void)size;
+    char ln[52];
+    bd_addr_t addr;
+    if(packet_type != HCI_EVENT_PACKET) return;
+
+    uint8_t ev = hci_event_packet_get_type(packet);
+    switch(ev) {
+        case BTSTACK_EVENT_STATE:
+            if(btstack_event_state_get_state(packet) == HCI_STATE_WORKING) {
+                print_evt("HCI up, inquiry...");
+                gap_inquiry_start(8);   /* 8 * 1.28s ~= 10.24s */
+            }
+            break;
+        case GAP_EVENT_INQUIRY_RESULT:
+            gap_event_inquiry_result_get_bd_addr(packet, addr);
+            snprintf(ln, sizeof(ln), "%d: %02X%02X%02X%02X%02X%02X",
+                     s_found++, addr[0], addr[1], addr[2],
+                                addr[3], addr[4], addr[5]);
+            print_evt(ln);
+            break;
+        case GAP_EVENT_INQUIRY_COMPLETE:
+            snprintf(ln, sizeof(ln), "inquiry done (%d)", s_found);
+            print_evt(ln);
+            s_done = true;
+            break;
+    }
+}
+
+bool dbg_bt_inquiry(void)
+{
+    s_row = 0;
+    s_found = 0;
+    s_done = false;
+
+    lcd_clear_display();
+    lcd_setfont(FONT_SYSFIXED);
+    print_evt("BT inquiry");
+
+    /* Bring up chip with our proven polled path, then upload firmware */
+    bt_hw_power(true);
+    print_evt("power: on");
+
+    /* HCI Reset over polled transport, then patchram */
+    static const uint8_t hci_reset[] = { 0x01, 0x03, 0x0C, 0x00 };
+    uint8_t ev_[16];
+    int n = bt_hci_cmd_reply(hci_reset, sizeof(hci_reset),
+                              ev_, sizeof(ev_), 2000);
+    if(n < 7) { print_evt("rst1 fail"); goto done; }
+
+    int up = bt_bcm_patchram_upload(BT_BCM_FW_PATH);
+    if(up <= 0) { print_evt("patchram fail"); goto done; }
+    mdelay(500);
+
+    /* Post-patchram HCI Reset (chip now in full firmware) */
+    n = bt_hci_cmd_reply(hci_reset, sizeof(hci_reset),
+                         ev_, sizeof(ev_), 2000);
+    if(n < 7) { print_evt("rst2 fail"); goto done; }
+    print_evt("fw ready");
+
+    /* Hand the UART over to BTstack's interrupt-driven transport */
+    hal_uart_dma_init();
+
+    btstack_memory_init();
+    btstack_run_loop_init(btstack_run_loop_embedded_get_instance());
+
+    static hci_transport_config_uart_t cfg = {
+        .type          = HCI_TRANSPORT_CONFIG_UART,
+        .baudrate_init = BT_UART_BAUD_INIT,
+        .baudrate_main = 0,
+        .flowcontrol   = 1,
+        .device_name   = NULL,
+        .parity        = 0,
+    };
+    hci_init(hci_transport_h4_instance(btstack_uart_block_embedded_instance()),
+             &cfg);
+
+    static btstack_packet_callback_registration_t reg;
+    reg.callback = &inquiry_packet_handler;
+    hci_add_event_handler(&reg);
+
+    print_evt("hci_power on");
+    hci_power_control(HCI_POWER_ON);
+
+    /* Poll run loop for up to ~15s or until GAP_EVENT_INQUIRY_COMPLETE */
+    long deadline = current_tick + 15 * HZ;
+    while(!s_done && !TIME_AFTER(current_tick, deadline)) {
+        btstack_run_loop_embedded_execute_once();
+        if(get_action(CONTEXT_STD, 0) == ACTION_STD_CANCEL)
+            break;
+    }
+
+    hci_power_control(HCI_POWER_OFF);
+
+done:
+    bt_hw_power(false);
+    print_evt("---");
     lcd_puts(0, 15, "POWER to exit");
     lcd_update();
     while(get_action(CONTEXT_STD, HZ) != ACTION_STD_CANCEL);
