@@ -1811,6 +1811,21 @@ target/mips/ingenic_x1000/erosqnative/bt-erosqnative.c
 #ifndef BOOTLOADER
 target/mips/ingenic_x1000/erosqnative/bt-bcm-patchram.c
 target/mips/ingenic_x1000/erosqnative/bt-diag.c
+/* BTstack core */
+drivers/btstack/src/hci.c
+drivers/btstack/src/hci_cmd.c
+drivers/btstack/src/hci_event.c
+drivers/btstack/src/hci_event_builder.c
+drivers/btstack/src/hci_transport_h4.c
+drivers/btstack/src/hci_dump.c
+drivers/btstack/src/btstack_memory.c
+drivers/btstack/src/btstack_linked_list.c
+drivers/btstack/src/btstack_memory_pool.c
+drivers/btstack/src/btstack_util.c
+drivers/btstack/src/btstack_run_loop.c
+drivers/btstack/src/ad_parser.c
+drivers/btstack/src/classic/sdp_util.c
+drivers/btstack/platform/embedded/btstack_run_loop_embedded.c
 #endif
 target/mips/ingenic_x1000/spl-nand-x1000.c
 #endif /* EROS_QN */

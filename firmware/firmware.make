@@ -13,6 +13,13 @@ ifndef APP_TYPE
 INCLUDES += -I$(FIRMDIR)/libc/include
 endif
 
+# BTstack (only used by erosqnative for now — harmless on other targets)
+INCLUDES += -I$(FIRMDIR)/drivers/btstack \
+            -I$(FIRMDIR)/drivers/btstack/src \
+            -I$(FIRMDIR)/drivers/btstack/src/classic \
+            -I$(FIRMDIR)/drivers/btstack/src/ble \
+            -I$(FIRMDIR)/drivers/btstack/platform/embedded
+
 ifneq ($(filter reggen,$(TOOLSET)),)
   include $(FIRMDIR)/reggen/reggen.make
 endif
