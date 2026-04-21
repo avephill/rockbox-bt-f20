@@ -1810,6 +1810,7 @@ target/mips/ingenic_x1000/erosqnative/power-erosqnative.c
 target/mips/ingenic_x1000/erosqnative/bt-erosqnative.c
 #ifndef BOOTLOADER
 target/mips/ingenic_x1000/erosqnative/bt-bcm-patchram.c
+target/mips/ingenic_x1000/erosqnative/bt-btstack-hal.c
 target/mips/ingenic_x1000/erosqnative/bt-diag.c
 /* BTstack core */
 drivers/btstack/src/hci.c

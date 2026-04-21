@@ -289,4 +289,5 @@ void uart_x1000_isr(int port)
 }
 
 /* Convenience ISR entry points — attach to INTC via system-x1000.c */
+void UART0(void) { uart_x1000_isr(0); }
 void UART1(void) { uart_x1000_isr(1); }
