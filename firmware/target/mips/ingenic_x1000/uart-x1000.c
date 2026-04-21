@@ -62,15 +62,26 @@ typedef struct {
 
 static uart_state_t uart_state[3];
 
-/* ---- baud divisor calculation ----
+/* ---- baud rate calculation ----
  *
- * The X1000 UART uses a 16x oversampled clock derived from exclk.
- * UDLHR:UDLLR = exclk / (16 * baud)  rounded to nearest integer.
- * UMR (clock multiplier) is set to 16, UACR (adjustment) to 0.
+ * The X1000 UART generates baud = exclk / (UMR * div) where UMR is the
+ * oversample ratio (4..31) and div is a 16-bit divisor in UDLHR:UDLLR.
+ * For standard bauds UMR=16 gives the expected low-error divisor; for
+ * high-speed (>1.5M on 24MHz exclk) we drop UMR so div stays >= 1.
  */
-static unsigned calc_divisor(unsigned baud, unsigned exclk_hz)
+static void calc_baud_params(unsigned baud, unsigned exclk_hz,
+                             unsigned* out_div, unsigned* out_umr)
 {
-    return (exclk_hz + 8 * baud) / (16 * baud);
+    unsigned total = (exclk_hz + baud / 2) / baud;   /* total oversample */
+    if(total >= 32) {
+        /* Standard bauds: keep UMR=16, use div */
+        *out_umr = 16;
+        *out_div = (total + 8) / 16;
+    } else {
+        /* High-speed: UMR = total, div = 1 */
+        *out_div = 1;
+        *out_umr = total < 4 ? 4 : (total > 31 ? 31 : total);
+    }
 }
 
 /* ---- CPM clock gating and INTC mask ---- */
@@ -177,12 +188,13 @@ void uart_x1000_modem_bt_release(int port)
 
 void uart_x1000_set_baud(int port, unsigned baud, unsigned exclk_hz)
 {
-    unsigned div = calc_divisor(baud, exclk_hz);
+    unsigned div, umr;
+    calc_baud_params(baud, exclk_hz, &div, &umr);
 
     jz_writef(UART_ULCR(port), DLAB(1));
     jz_write(UART_UDLHR(port), (div >> 8) & 0xff);
     jz_write(UART_UDLLR(port),  div       & 0xff);
-    jz_write(UART_UMR(port),   16);
+    jz_write(UART_UMR(port),   umr);
     jz_write(UART_UACR(port),   0);
     jz_writef(UART_ULCR(port), DLAB(0));
 }

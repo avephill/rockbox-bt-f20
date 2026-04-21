@@ -99,6 +99,34 @@ bool dbg_bt_diag(void)
         putline(&row, ln);
     }
 
+    /* 8. BCM vendor Update_Baudrate (0xFC18) -> switch to 3 Mbps
+     * Params: 2 bytes reserved (0x00 0x00) + 4 bytes baud little-endian */
+    uint8_t baud_cmd[10] = {
+        0x01, 0x18, 0xFC, 0x06,
+        0x00, 0x00,
+        (uint8_t)(BT_UART_BAUD_HS      ),
+        (uint8_t)(BT_UART_BAUD_HS >>  8),
+        (uint8_t)(BT_UART_BAUD_HS >> 16),
+        (uint8_t)(BT_UART_BAUD_HS >> 24),
+    };
+    int st = bt_hci_cmd(baud_cmd, sizeof(baud_cmd), 500);
+    snprintf(ln, sizeof(ln), "baud: st=%d", st);
+    putline(&row, ln);
+    if(st == 0) {
+        /* Chip acknowledged; now switch our UART and verify */
+        mdelay(20);
+        bt_hw_set_baud(BT_UART_BAUD_HS);
+
+        n = bt_hci_cmd_reply(c_bdaddr, sizeof(c_bdaddr), ev, sizeof(ev), 500);
+        if(n >= 13 && ev[6] == 0) {
+            snprintf(ln, sizeof(ln), "3M BD %02X:%02X:%02X:%02X:%02X:%02X",
+                     ev[12], ev[11], ev[10], ev[9], ev[8], ev[7]);
+        } else {
+            snprintf(ln, sizeof(ln), "3M fail n=%d", n);
+        }
+        putline(&row, ln);
+    }
+
 done:
     bt_hw_power(false);
     putline(&row, "---");
