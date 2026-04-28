@@ -319,3 +319,15 @@ __pycache__
 
 # /utils/time-sync/
 /utils/time-sync/time-sync
+
+# Local research / scratch (avephill 2026-04 BT work)
+/Ingenic-flash-dump/
+/a.out
+/compass_artifact_*.md
+/dmesg_output_*.txt
+/project-status.md
+/iClassic_v1.1.zip
+/loafbrad-rockbox/
+/rockbox-erosqnative-*.zip
+tools/a.out
+/rockbox-fonts-*.zip
