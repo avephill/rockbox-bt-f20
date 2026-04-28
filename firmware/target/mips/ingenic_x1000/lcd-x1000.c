@@ -239,7 +239,7 @@ static void lcd_fbcopy_dma_run(dma_desc* d, Lcd_ID id)
 
 static void lcd_fbcopy_dma_full(void)
 {
-    dma_desc d;
+    static dma_desc d;
     d.cm = jz_orf(DMA_CHN_CM, SAI(1), DAI(1), RDIL(9),
                   SP_V(32BIT), DP_V(32BIT), TSZ_V(AUTO),
                   STDE(0), TIE(1), LINK(0));
@@ -262,7 +262,7 @@ static void lcd_fbcopy_dma_partial1(int x, int y, int width, int height)
 {
     int stride = STRIDE_MAIN(LCD_WIDTH - width, LCD_HEIGHT - height);
 
-    dma_desc d;
+    static dma_desc d;
     d.cm = jz_orf(DMA_CHN_CM, SAI(1), DAI(1), RDIL(9),
                   SP_V(32BIT), DP_V(32BIT), TSZ_V(AUTO),
                   STDE(stride ? 1 : 0), TIE(1), LINK(0));

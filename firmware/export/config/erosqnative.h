@@ -22,6 +22,11 @@
 #endif
 #endif
 
+/* BT A2DP source — adds bt_pcm_sink alongside the X1000 DAC sink. */
+#ifndef BOOTLOADER
+#define HAVE_BT_PCM_SINK
+#endif
+
 /* CPU defines */
 #define CONFIG_CPU      X1000
 #define X1000_EXCLK_FREQ   24000000

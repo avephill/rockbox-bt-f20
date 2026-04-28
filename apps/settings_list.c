@@ -1312,6 +1312,10 @@ const struct settings_list settings[] = {
     OFFON_SETTING(0, lineout_active, LANG_LINEOUT,
                   true, "lineout", lineout_set),
 #endif
+#ifdef HAVE_BT_PCM_SINK
+    OFFON_SETTING(0, bt_autoconnect, LANG_BT_AUTOCONNECT_ON_BOOT,
+                  false, "bt autoconnect", NULL),
+#endif
     /* tuner */
 #if CONFIG_TUNER
     OFFON_SETTING(0, fm_force_mono, LANG_FM_MONO_MODE,

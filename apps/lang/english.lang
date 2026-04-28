@@ -17043,3 +17043,20 @@
     *: "Always remember last folder"
   </voice>
 </phrase>
+<phrase>
+  id: LANG_BT_AUTOCONNECT_ON_BOOT
+  desc: in settings_menu
+  user: core
+  <source>
+    *: none
+    erosqnative: "Auto-connect Bluetooth on boot"
+  </source>
+  <dest>
+    *: none
+    erosqnative: "Auto-connect Bluetooth on boot"
+  </dest>
+  <voice>
+    *: none
+    erosqnative: "Auto-connect Bluetooth on boot"
+  </voice>
+</phrase>

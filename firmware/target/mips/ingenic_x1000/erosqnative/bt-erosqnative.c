@@ -108,18 +108,21 @@ int bt_hw_power(bool on)
 
 int bt_hw_send(const uint8_t* buf, size_t len)
 {
+    /* Busy-wait on the UART TX FIFO instead of yield()ing. At 3 Mbps with
+     * a 16-byte FIFO, draining from full to half takes ~21 µs — yielding to
+     * other threads in that window costs ~1 ms per yield, which on a ~670-
+     * byte A2DP media packet adds ~50 ms of overhead and caps the send rate
+     * at ~19 packets/s (insufficient to keep up with 44.1 kHz audio). */
     for(size_t i = 0; i < len; i++) {
         long dl = current_tick + 500 * HZ / 1000;
         while(!jz_readf(UART_ULSR(BT_UART_PORT), TDRQ)) {
             if(TIME_AFTER(current_tick, dl)) return -1;
-            yield();
         }
         jz_write(UART_UTHR(BT_UART_PORT), buf[i]);
     }
     long fdl = current_tick + 1000 * HZ / 1000;
     while(!jz_readf(UART_ULSR(BT_UART_PORT), TEMP)) {
         if(TIME_AFTER(current_tick, fdl)) return -1;
-        yield();
     }
     return 0;
 }

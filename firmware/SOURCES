@@ -1812,6 +1812,10 @@ target/mips/ingenic_x1000/erosqnative/bt-erosqnative.c
 target/mips/ingenic_x1000/erosqnative/bt-bcm-patchram.c
 target/mips/ingenic_x1000/erosqnative/bt-btstack-hal.c
 target/mips/ingenic_x1000/erosqnative/bt-diag.c
+target/mips/ingenic_x1000/erosqnative/bt-a2dp.c
+target/mips/ingenic_x1000/erosqnative/bt-pcm-sink.c
+target/mips/ingenic_x1000/erosqnative/bt-tlv.c
+target/mips/ingenic_x1000/erosqnative/bt-service.c
 /* BTstack core */
 drivers/btstack/src/hci.c
 drivers/btstack/src/hci_cmd.c
@@ -1825,7 +1829,30 @@ drivers/btstack/src/btstack_memory_pool.c
 drivers/btstack/src/btstack_util.c
 drivers/btstack/src/btstack_run_loop.c
 drivers/btstack/src/ad_parser.c
+drivers/btstack/src/l2cap.c
+drivers/btstack/src/l2cap_signaling.c
 drivers/btstack/src/classic/sdp_util.c
+drivers/btstack/src/classic/sdp_server.c
+drivers/btstack/src/classic/sdp_client.c
+drivers/btstack/src/classic/btstack_link_key_db_memory.c
+drivers/btstack/src/classic/btstack_link_key_db_tlv.c
+/* A2DP source profile (AVDTP transport + a2dp wrapper; SBC encoder comes later) */
+drivers/btstack/src/classic/avdtp.c
+drivers/btstack/src/classic/avdtp_initiator.c
+drivers/btstack/src/classic/avdtp_acceptor.c
+drivers/btstack/src/classic/avdtp_source.c
+drivers/btstack/src/classic/avdtp_util.c
+drivers/btstack/src/classic/a2dp.c
+drivers/btstack/src/classic/a2dp_source.c
+drivers/btstack/src/classic/btstack_sbc_bluedroid.c
+drivers/btstack/3rd-party/bluedroid/encoder/srce/sbc_analysis.c
+drivers/btstack/3rd-party/bluedroid/encoder/srce/sbc_dct.c
+drivers/btstack/3rd-party/bluedroid/encoder/srce/sbc_dct_coeffs.c
+drivers/btstack/3rd-party/bluedroid/encoder/srce/sbc_enc_bit_alloc_mono.c
+drivers/btstack/3rd-party/bluedroid/encoder/srce/sbc_enc_bit_alloc_ste.c
+drivers/btstack/3rd-party/bluedroid/encoder/srce/sbc_enc_coeffs.c
+drivers/btstack/3rd-party/bluedroid/encoder/srce/sbc_encoder.c
+drivers/btstack/3rd-party/bluedroid/encoder/srce/sbc_packing.c
 drivers/btstack/platform/embedded/btstack_run_loop_embedded.c
 drivers/btstack/platform/embedded/btstack_uart_block_embedded.c
 #endif

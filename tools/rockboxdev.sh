@@ -813,6 +813,35 @@ do
     case $arch in
         [Ii])
             build "binutils" "mipsel-elf" "2.38" "binutils-c23.patch" "--disable-werror" "gmp isl"
+            # Install a smart 'as' wrapper so GCC's build system doesn't use the
+            # MIPS assembler when compiling host (x86) code.
+            MIPS_SYSROOT="$prefix/mipsel-elf"
+            if [ -f "$MIPS_SYSROOT/bin/as" ]; then
+                mv "$MIPS_SYSROOT/bin/as" "$MIPS_SYSROOT/bin/as.real"
+                cat > "$MIPS_SYSROOT/bin/as" << 'ASWRAPPER'
+#!/bin/sh
+MIPS_AS="$(dirname "$0")/as.real"
+HOST_AS="/usr/bin/as"
+for arg in "$@"; do
+    case "$arg" in
+        --32|--64|--x32) exec "$HOST_AS" "$@" ;;
+        -EL|-EB|--trap|--no-trap) exec "$MIPS_AS" "$@" ;;
+    esac
+done
+for arg in "$@"; do
+    case "$arg" in
+        *.s|*.S)
+            if [ -f "$arg" ] && grep -qm1 '\.set mips\|\.ent \|\.nan\|\.arch mips' "$arg" 2>/dev/null; then
+                exec "$MIPS_AS" "$@"
+            fi
+            ;;
+    esac
+done
+exec "$HOST_AS" "$@"
+ASWRAPPER
+                chmod +x "$MIPS_SYSROOT/bin/as"
+                echo "ROCKBOXDEV: installed smart as wrapper at $MIPS_SYSROOT/bin/as"
+            fi
             build "gcc" "mipsel-elf" "9.5.0" "" "" "gmp mpfr mpc isl"
             ;;
 

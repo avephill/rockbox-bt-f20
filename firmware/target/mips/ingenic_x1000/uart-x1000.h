@@ -25,22 +25,29 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Callback invoked from interrupt context when RX data is available.
- * 'buf' points into the ring buffer — copy before returning. */
-typedef void (*uart_rx_cb_t)(const uint8_t* buf, size_t len);
+/* Notification invoked from interrupt context after the ISR has pushed
+ * newly received bytes into the ring. The listener should drain what it
+ * needs via uart_x1000_rx_read(); bytes remain in the ring until popped. */
+typedef void (*uart_rx_notify_t)(int port);
 
 /* Initialise a UART port.
  *
- *   port     — 0, 1, or 2
- *   baud     — baud rate (e.g. 115200)
- *   exclk_hz — X1000 external clock frequency (24 000 000 for all known boards)
- *   rx_cb    — called from ISR when bytes arrive; may be NULL for TX-only use
- *   rx_buf   — caller-provided ring buffer (must be power-of-2 in size)
- *   rx_bufsz — size of rx_buf in bytes (must be power of 2)
+ *   port      — 0, 1, or 2
+ *   baud      — baud rate (e.g. 115200)
+ *   exclk_hz  — X1000 external clock frequency (24 000 000 for all known boards)
+ *   rx_notify — called from ISR after bytes have been pushed to the ring;
+ *               may be NULL for TX-only / polled-RX use
+ *   rx_buf    — caller-provided ring buffer (must be power-of-2 in size)
+ *   rx_bufsz  — size of rx_buf in bytes (must be power of 2)
  */
 void uart_x1000_init(int port, unsigned baud, unsigned exclk_hz,
-                     uart_rx_cb_t rx_cb,
+                     uart_rx_notify_t rx_notify,
                      uint8_t* rx_buf, size_t rx_bufsz);
+
+/* Pop up to `max` bytes from the RX ring into `buf`. Returns the number
+ * actually copied (0 if ring is empty). Safe to call from both thread
+ * and IRQ context. */
+size_t uart_x1000_rx_read(int port, uint8_t* buf, size_t max);
 
 /* Change baud rate without full re-init (used after RTL firmware upload). */
 void uart_x1000_set_baud(int port, unsigned baud, unsigned exclk_hz);

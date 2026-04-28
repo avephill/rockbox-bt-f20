@@ -47,6 +47,9 @@
 #endif
 #include "audio.h"
 #include "settings.h"
+#ifdef HAVE_BT_PCM_SINK
+#include "bt-service.h"
+#endif
 #include "backlight.h"
 #include "status.h"
 #include "debug_menu.h"
@@ -242,6 +245,18 @@ int main(void)
 
     global_status.last_volume_change = 0;
     validate_start_directory_init();
+
+#if !defined(BOOTLOADER) && defined(HAVE_BT_PCM_SINK)
+    /* Boot autoconnect: when the user has opted in, kick off BT
+     * enable + connect-last in the background so playback can resume
+     * over their last speaker without ever entering the BT menu. The
+     * BT thread's HCI_STATE_WORKING handler picks up the autoconnect
+     * flag once the chip is ready (~3-5s later), so this call returns
+     * immediately and doesn't block boot. */
+    if (global_settings.bt_autoconnect)
+        bt_service_enable_and_connect_last();
+#endif
+
     /* no calls INIT_ATTR functions after this point anymore!
      * see definition of INIT_ATTR in config.h */
     CHART(">root_menu");

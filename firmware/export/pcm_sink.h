@@ -52,7 +52,14 @@ struct pcm_sink {
 
 enum pcm_sink_ids {
     PCM_SINK_BUILTIN = 0,
+#ifdef HAVE_BT_PCM_SINK
+    PCM_SINK_BT,
+#endif
+    PCM_SINK_COUNT,
 };
 
 /* defined in each platform pcm source */
 extern struct pcm_sink builtin_pcm_sink;
+#ifdef HAVE_BT_PCM_SINK
+extern struct pcm_sink bt_pcm_sink;
+#endif

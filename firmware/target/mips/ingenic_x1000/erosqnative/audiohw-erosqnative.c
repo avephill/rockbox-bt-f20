@@ -23,6 +23,9 @@
 #include "audiohw.h"
 #include "pcm_sw_volume.h"
 #include "pcm_sampr.h"
+#ifdef HAVE_BT_PCM_SINK
+#include "bt-pcm-sink.h"
+#endif
 #include "i2c-target.h"
 #include "button.h"
 
@@ -187,12 +190,23 @@ void audiohw_set_volume(int vol_l, int vol_r)
     }
 #endif
 
+    l = l <= PCM5102A_VOLUME_MIN ? PCM_MUTE_LEVEL : l;
+    r = r <= PCM5102A_VOLUME_MIN ? PCM_MUTE_LEVEL : r;
+
+#ifdef HAVE_BT_PCM_SINK
+    /* When BT is the active output the DAC is out of the audio path, so
+     * I2C volume to the ES9018K2M does nothing audible. Route the volume
+     * through pcm_set_master_volume (software scaling in pcm_sw_volume.c)
+     * instead. */
+    if (bt_pcm_sink_is_active())
+    {
+        pcm_set_master_volume(l, r);
+        return;
+    }
+#endif
+
     if (es9018k2m_present_flag) /* ES9018K2M */
     {
-        /* Same volume range and mute point for both DACs, so use PCM5102A_VOLUME_MIN */
-        l = l <= PCM5102A_VOLUME_MIN ? PCM_MUTE_LEVEL : l;
-        r = r <= PCM5102A_VOLUME_MIN ? PCM_MUTE_LEVEL : r;
-
         /* set software volume just below unity due to
          * DAC offset. We don't want to overflow the PCM system. */
         pcm_set_master_volume(-1, -1);
@@ -200,9 +214,6 @@ void audiohw_set_volume(int vol_l, int vol_r)
     }
     else /* PCM5102A */
     {
-        l = l <= PCM5102A_VOLUME_MIN ? PCM_MUTE_LEVEL : l;
-        r = r <= PCM5102A_VOLUME_MIN ? PCM_MUTE_LEVEL : r;
-
         pcm_set_master_volume(l, r);
     }
 }

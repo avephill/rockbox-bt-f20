@@ -63,6 +63,7 @@ void pcm_postinit(void);
 bool pcm_is_initialized(void);
 
 enum pcm_sink_ids pcm_current_sink(void);
+void pcm_set_current_sink(enum pcm_sink_ids new_sink);
 const struct pcm_sink_caps* pcm_sink_caps(enum pcm_sink_ids sink);
 
 /* shortcut for plugins */

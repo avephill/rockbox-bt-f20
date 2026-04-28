@@ -64,7 +64,10 @@ enum {
     GO_TO_PLAYLISTS_SCREEN,
     GO_TO_PLAYLIST_VIEWER,
     GO_TO_SYSTEM_SCREEN,
-    GO_TO_SHORTCUTMENU
+    GO_TO_SHORTCUTMENU,
+#ifdef HAVE_BT_PCM_SINK
+    GO_TO_BLUETOOTH,
+#endif
 };
 #ifndef PLUGIN
 extern struct menu_item_ex root_menu_;

@@ -32,6 +32,9 @@
 #include <string.h>
 #include <stdbool.h>
 #include "devicedata.h"
+#ifdef HAVE_BT_PCM_SINK
+#include "bt-pcm-sink.h"
+#endif
 
 #ifndef BOOTLOADER
 # include "settings.h"
@@ -167,6 +170,14 @@ bool headphones_inserted(void)
         eros_qn_set_outputs();
 #endif
     }
+#if !defined(BOOTLOADER) && defined(HAVE_BT_PCM_SINK)
+    /* When BT is the active output, report headphones as present so the
+     * playback engine doesn't auto-pause via SYS_PHONE_UNPLUGGED. The
+     * existing button.c poll will detect this transition and post
+     * SYS_PHONE_PLUGGED, which unpauses any prior unplug-pause. */
+    if (bt_pcm_sink_is_active())
+        return true;
+#endif
 #if !defined(BOOTLOADER)
     if (global_settings.hp_lo_select == 1) // force headphones
     {

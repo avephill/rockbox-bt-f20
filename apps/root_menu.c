@@ -453,6 +453,15 @@ static int load_bmarks(void* param)
     return GO_TO_PREVIOUS;
 }
 
+#ifdef HAVE_BT_PCM_SINK
+static int btscrn(void* param)
+{
+    (void)param;
+    do_menu(&bluetooth_menu, NULL, NULL, false);
+    return GO_TO_PREVIOUS;
+}
+#endif
+
 /* These are all static const'd from apps/menus/ *.c
    so little hack so we can use them */
 extern struct menu_item_ex
@@ -490,6 +499,9 @@ static const struct root_items items[] = {
     [GO_TO_PLAYLIST_VIEWER] = { playlist_view, NULL, &playlist_options },
     [GO_TO_SYSTEM_SCREEN] = { miscscrn, &info_menu, &system_menu },
     [GO_TO_SHORTCUTMENU] = { do_shortcut_menu, NULL, NULL },
+#ifdef HAVE_BT_PCM_SINK
+    [GO_TO_BLUETOOTH] =     { btscrn, NULL, NULL },
+#endif
 
 };
 #define NUM_ITEMS (int)(sizeof(items)/sizeof(*items))
@@ -500,6 +512,11 @@ static int item_callback(int action,
 
 MENUITEM_RETURNVALUE(shortcut_menu, ID2P(LANG_SHORTCUTS), GO_TO_SHORTCUTMENU,
                         NULL, Icon_Bookmark);
+
+#ifdef HAVE_BT_PCM_SINK
+MENUITEM_RETURNVALUE(bluetooth_root_item, "Bluetooth", GO_TO_BLUETOOTH,
+                        NULL, Icon_NOICON);
+#endif
 
 MENUITEM_RETURNVALUE(file_browser, ID2P(LANG_DIR_BROWSER), GO_TO_FILEBROWSER,
                         NULL, Icon_file_view_menu);
@@ -561,6 +578,9 @@ static struct menu_table menu_table[] = {
     { "plugins", &rocks_browser },
     { "system_menu", &system_menu_ },
     { "shortcuts", &shortcut_menu },
+#ifdef HAVE_BT_PCM_SINK
+    { "bluetooth", &bluetooth_root_item },
+#endif
 };
 #define MAX_MENU_ITEMS (sizeof(menu_table) / sizeof(struct menu_table))
 static struct menu_item_ex *root_menu__[MAX_MENU_ITEMS];

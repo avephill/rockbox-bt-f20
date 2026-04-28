@@ -49,7 +49,8 @@
 #define HCI_ACL_PAYLOAD_SIZE                (1024 + 4)
 #define HCI_INCOMING_PRE_BUFFER_SIZE        6
 
-/* No flash storage for link keys yet — use RAM only */
+/* Persistent link keys via TLV (see bt-tlv.c → /.rockbox/bt_keys.dat). */
 #define NVM_NUM_DEVICE_DB_ENTRIES           8
+#define NVM_NUM_LINK_KEYS                   8
 
 #endif /* _BTSTACK_CONFIG_H */

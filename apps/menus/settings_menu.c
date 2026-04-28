@@ -766,6 +766,9 @@ MAKE_MENU(settings_menu_item, ID2P(LANG_GENERAL_SETTINGS), 0,
           &autoresume_menu,
 #endif
           &browse_langs, &voice_settings_menu,
+#ifdef HAVE_BT_PCM_SINK
+          &bluetooth_menu,
+#endif
           );
 /*    SETTINGS MENU                */
 /***********************************/

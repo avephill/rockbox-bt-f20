@@ -801,6 +801,10 @@ struct user_settings
     bool lineout_active;
 #endif
 
+#ifdef HAVE_BT_PCM_SINK
+    bool bt_autoconnect; /* auto-enable BT and reconnect to last device on boot */
+#endif
+
 #ifdef HAVE_SPEAKER
     int speaker_mode; /* 0: off, 1: on, 2: auto (only if headphone detection) */
 #endif /* HAVE_SPEAKER */

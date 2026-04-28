@@ -76,8 +76,11 @@
  *
  */
 
-static struct pcm_sink* sinks[1] = {
+static struct pcm_sink* sinks[PCM_SINK_COUNT] = {
     [PCM_SINK_BUILTIN] = &builtin_pcm_sink,
+#ifdef HAVE_BT_PCM_SINK
+    [PCM_SINK_BT]      = &bt_pcm_sink,
+#endif
 };
 static enum pcm_sink_ids cur_sink = PCM_SINK_BUILTIN;
 
@@ -289,6 +292,40 @@ const struct pcm_sink_caps* pcm_sink_caps(enum pcm_sink_ids sink)
 const struct pcm_sink_caps* pcm_current_sink_caps(void)
 {
     return pcm_sink_caps(pcm_current_sink());
+}
+
+/* Swap the active output sink. If playback is in progress, the current sink
+ * is stopped, the swap happens, and playback is re-primed on the new sink
+ * using the still-registered pcm_callback_for_more. Caller is responsible
+ * for ensuring pcm_callback_for_more remains valid across the swap. */
+void pcm_set_current_sink(enum pcm_sink_ids new_sink)
+{
+    if (new_sink == cur_sink)
+        return;
+
+    enum pcm_sink_ids old_sink = cur_sink;
+
+    /* Halt the old sink. */
+    sinks[old_sink]->ops.lock();
+    if (pcm_playing)
+        sinks[old_sink]->ops.stop();
+    sinks[old_sink]->ops.unlock();
+
+    /* Capture and clear playback state so the next pcm_play_data starts
+     * cleanly through whichever pcm_play_dma_start_int variant is in use
+     * (e.g. pcm_sw_volume.c's, which double-fills its dbl_buf via two
+     * STARTED callbacks before calling sink.play). Bypassing this with a
+     * direct sink.play(addr,size) leaves one of the dbl_bufs unfilled,
+     * yielding alternating audio/silence frames. */
+    pcm_play_callback_type   saved_get_more = pcm_callback_for_more;
+    pcm_status_callback_type saved_status   = pcm_play_status_callback;
+    bool was_playing = pcm_playing;
+    pcm_playing = false;
+
+    cur_sink = new_sink;
+
+    if (was_playing && saved_get_more)
+        pcm_play_data(saved_get_more, saved_status, NULL, 0);
 }
 
 void pcm_play_data(pcm_play_callback_type get_more,

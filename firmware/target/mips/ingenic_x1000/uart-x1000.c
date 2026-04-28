@@ -56,8 +56,8 @@ static inline int rb_pop(ringbuf_t* r, uint8_t* out)
 /* ---- per-port state ---- */
 
 typedef struct {
-    ringbuf_t   rx;
-    uart_rx_cb_t rx_cb;
+    ringbuf_t        rx;
+    uart_rx_notify_t rx_notify;
 } uart_state_t;
 
 static uart_state_t uart_state[3];
@@ -109,14 +109,14 @@ static void uart_intc_enable(int port, int enable)
 /* ---- public API ---- */
 
 void uart_x1000_init(int port, unsigned baud, unsigned exclk_hz,
-                     uart_rx_cb_t rx_cb,
+                     uart_rx_notify_t rx_notify,
                      uint8_t* rx_buf, size_t rx_bufsz)
 {
     uart_state_t* s = &uart_state[port];
-    s->rx.buf  = rx_buf;
-    s->rx.mask = rx_bufsz - 1;
-    s->rx.head = s->rx.tail = 0;
-    s->rx_cb   = rx_cb;
+    s->rx.buf     = rx_buf;
+    s->rx.mask    = rx_bufsz - 1;
+    s->rx.head    = s->rx.tail = 0;
+    s->rx_notify  = rx_notify;
 
     uart_ungate_clock(port);
     uart_intc_enable(port, 0);  /* mask at INTC during init */
@@ -161,12 +161,25 @@ void uart_x1000_init(int port, unsigned baud, unsigned exclk_hz,
 
     /* Enable RX data available interrupt only.
      * TX interrupt is not used — we poll TDRQ in uart_x1000_write(). */
-    if(rx_cb) {
+    if(rx_notify) {
         jz_write(UART_UIER(port), BM_UART_UIER_RDRIE);
         uart_intc_enable(port, 1);
     } else {
         jz_write(UART_UIER(port), 0);
     }
+}
+
+size_t uart_x1000_rx_read(int port, uint8_t* buf, size_t max)
+{
+    if(port < 0 || port > 2) return 0;
+    uart_state_t* s = &uart_state[port];
+    size_t n = 0;
+    while(n < max) {
+        if(s->rx.tail == s->rx.head) break;
+        buf[n++] = s->rx.buf[s->rx.tail];
+        s->rx.tail = (s->rx.tail + 1) & s->rx.mask;
+    }
+    return n;
 }
 
 void uart_x1000_modem_bt_host_ready(int port)
@@ -256,9 +269,12 @@ int uart_x1000_flush_timed(int port, int timeout_ms)
  * Wire these up in system-x1000.c's interrupt table, or call
  * uart_x1000_isr(port) from a shared handler.
  *
- * The ISR drains the RX FIFO into the ring buffer, then calls rx_cb
- * with the newly arrived bytes so the BT stack can process them without
- * copying through a second buffer.
+ * The ISR pushes all available FIFO bytes into the ring buffer and
+ * then fires rx_notify so the listener knows data is waiting. Data is
+ * not consumed from the ring here — the listener must call
+ * uart_x1000_rx_read() to pop bytes. Previously the ISR also drained
+ * the ring to the callback, which silently dropped bytes that the
+ * callback didn't want.
  */
 void uart_x1000_isr(int port)
 {
@@ -270,22 +286,9 @@ void uart_x1000_isr(int port)
         rb_push(&s->rx, c);
     }
 
-    /* Notify listener if one is registered.
-     * For BTstack this will be the HCI transport receive pump. */
-    if(s->rx_cb && s->rx.head != s->rx.tail) {
-        /* Deliver contiguous slice from tail to end-of-buffer or head,
-         * whichever comes first, then let the callback loop if needed. */
-        size_t tail = s->rx.tail;
-        size_t head = s->rx.head;
-        size_t end  = (tail < head) ? head : (s->rx.mask + 1);
-        s->rx_cb(s->rx.buf + tail, end - tail);
-        s->rx.tail = end & s->rx.mask;
-        /* Second slice if wrapped */
-        if(s->rx.head != s->rx.tail) {
-            s->rx_cb(s->rx.buf, s->rx.head);
-            s->rx.tail = s->rx.head;
-        }
-    }
+    /* Notify listener that bytes are waiting in the ring. */
+    if(s->rx_notify)
+        s->rx_notify(port);
 }
 
 /* Convenience ISR entry points — attach to INTC via system-x1000.c */
