@@ -68,6 +68,17 @@ static void exception_dump(void* frame, unsigned long epc,
     vsnprintf(panic_buf, sizeof(panic_buf), fmt, ap);
     va_end(ap);
 
+#if !defined(BOOTLOADER) && CONFIG_CPU == X1000
+    /* Capture for next-boot drain. Done before the LCD writes so partial
+     * LCD failures don't lose the crash info. */
+    extern void crash_log_capture_exception(const char* msg, uint32_t epc,
+                                            uint32_t badvaddr, uint32_t cause);
+    crash_log_capture_exception(panic_buf,
+                                (uint32_t)epc,
+                                (uint32_t)read_c0_badvaddr(),
+                                (uint32_t)read_c0_cause());
+#endif
+
     lcd_set_viewport(NULL);
 #if LCD_DEPTH > 1
     lcd_set_backdrop(NULL);

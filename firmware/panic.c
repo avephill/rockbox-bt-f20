@@ -97,6 +97,13 @@ void panicf( const char *fmt, ...)
     vsnprintf( panic_buf, sizeof(panic_buf), fmt, ap );
     va_end( ap );
 
+#if !defined(BOOTLOADER) && CONFIG_CPU == X1000
+    /* Capture into the persistent crash-log struct BEFORE the LCD render
+     * so even a hang during rendering still leaves us with breadcrumbs. */
+    extern void crash_log_capture_panicf(const char* msg);
+    crash_log_capture_panicf(panic_buf);
+#endif
+
     lcd_set_viewport(NULL);
 
     int y = 1;

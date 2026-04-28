@@ -34,6 +34,13 @@
 
 #include "bt-service.h"
 
+#if !defined(BOOTLOADER) && CONFIG_CPU == X1000
+#include "crash_log.h"
+#define BTM_BC(...)  crash_log_breadcrumbf(__VA_ARGS__)
+#else
+#define BTM_BC(...)  do { } while (0)
+#endif
+
 static const char* state_str(enum bt_state s)
 {
     switch(s) {
@@ -205,6 +212,7 @@ int bt_open_screen(void);
 int bt_open_screen(void)
 {
     s_pick_sel = 0;
+    BTM_BC("bt-menu: opened");
 
     /* Auto-enable BT on entry. Idempotent if already on. */
     bt_service_enable();
@@ -212,6 +220,8 @@ int bt_open_screen(void)
     while(true) {
         redraw();
         int act = get_action(CONTEXT_STD, HZ/4);
+        if(act != ACTION_NONE && act != ACTION_UNKNOWN)
+            BTM_BC("bt-menu: action %d sel=%d", act, s_pick_sel);
         if(act == ACTION_STD_CANCEL) break;
 
         enum bt_state st = bt_service_get_state();

@@ -136,6 +136,17 @@ SECTIONS
         _end = .;
     } > DRAM
 
+    /* Persistent crash log: lives just past the BSS clear range so crt0
+     * leaves DRAM contents intact across the soft reset that follows a
+     * panic. main() inspects the magic word on boot and, if set, drains
+     * the contents to /.rockbox/crash.log. */
+    .crash_log (NOLOAD) :
+    {
+        _crash_log_begin = ALIGN(4);
+        *(.crash_log);
+        _crash_log_end = ALIGN(4);
+    } > DRAM
+
     .audiobuf :
     {
         . = ALIGN(4);

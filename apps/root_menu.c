@@ -746,6 +746,13 @@ static inline int load_screen(int screen)
     if (activity != ACTIVITY_UNKNOWN)
         push_current_activity(activity);
 
+#if !defined(BOOTLOADER) && CONFIG_CPU == X1000
+    {
+        extern void crash_log_breadcrumbf(const char* fmt, ...);
+        crash_log_breadcrumbf("root: -> screen %d", screen);
+    }
+#endif
+
     ret_val = items[screen].function(items[screen].param);
 
     if (activity != ACTIVITY_UNKNOWN)

@@ -50,6 +50,9 @@
 #ifdef HAVE_BT_PCM_SINK
 #include "bt-service.h"
 #endif
+#if !defined(BOOTLOADER) && CONFIG_CPU == X1000
+#include "crash_log.h"
+#endif
 #include "backlight.h"
 #include "status.h"
 #include "debug_menu.h"
@@ -459,6 +462,16 @@ static void init(void)
     viewportmanager_init();
 
     storage_init();
+#if !defined(BOOTLOADER) && CONFIG_CPU == X1000
+    /* Drain any crash log captured by the previous boot's panic handler.
+     * Must come after storage_init (filesystem ready) but before audio /
+     * BT bring-up, which may themselves crash and we want to keep the
+     * old log intact in that case. crash_log_reset wipes the breadcrumb
+     * ring so this boot starts with a clean trail. */
+    crash_log_drain_to_file();
+    crash_log_reset();
+    crash_log_breadcrumb("boot: drained prior log, ring reset");
+#endif
     pcm_init();
     dsp_init();
     settings_reset();

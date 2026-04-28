@@ -62,6 +62,7 @@
 #include "bt-pcm-sink.h"
 
 #include "bt-service.h"
+#include "crash_log.h"
 
 extern const btstack_uart_t * btstack_uart_block_embedded_instance(void);
 
@@ -324,8 +325,27 @@ static void bonded_remove_at(int idx)
 
 /* ---- status helpers ---- */
 
+static const char* state_str_for_log(enum bt_state s)
+{
+    switch(s) {
+    case BT_STATE_OFF:        return "OFF";
+    case BT_STATE_ENABLING:   return "ENABLING";
+    case BT_STATE_READY:      return "READY";
+    case BT_STATE_SCANNING:   return "SCANNING";
+    case BT_STATE_CONNECTING: return "CONNECTING";
+    case BT_STATE_STREAMING:  return "STREAMING";
+    case BT_STATE_FAILED:     return "FAILED";
+    default:                  return "?";
+    }
+}
+
 static void set_state(enum bt_state st)
 {
+    if(st != s_state) {
+        crash_log_breadcrumbf("bt: %s -> %s",
+                              state_str_for_log(s_state),
+                              state_str_for_log(st));
+    }
     s_state = st;
 }
 

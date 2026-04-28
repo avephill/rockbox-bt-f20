@@ -50,6 +50,9 @@ timer.c
 debug.c
 #endif /* PLATFORM_NATIVE */
 panic.c
+#if !defined(BOOTLOADER) && CONFIG_CPU == X1000
+crash_log.c
+#endif
 #if (CONFIG_PLATFORM & PLATFORM_HOSTED) && defined(BOOTFILE)
 target/hosted/rolo.c
 #endif
