@@ -1847,6 +1847,9 @@ drivers/btstack/src/classic/avdtp_source.c
 drivers/btstack/src/classic/avdtp_util.c
 drivers/btstack/src/classic/a2dp.c
 drivers/btstack/src/classic/a2dp_source.c
+drivers/btstack/src/classic/avrcp.c
+drivers/btstack/src/classic/avrcp_target.c
+drivers/btstack/src/classic/avrcp_controller.c
 drivers/btstack/src/classic/btstack_sbc_bluedroid.c
 drivers/btstack/3rd-party/bluedroid/encoder/srce/sbc_analysis.c
 drivers/btstack/3rd-party/bluedroid/encoder/srce/sbc_dct.c
