@@ -55,11 +55,15 @@
 #include "classic/a2dp_source.h"
 #include "classic/avdtp.h"
 #include "classic/avdtp_util.h"
+#include "classic/avrcp.h"
+#include "classic/avrcp_target.h"
+#include "classic/avrcp_controller.h"
 #include "l2cap.h"
 
 #include "pcm.h"
 #include "pcm_sink.h"
 #include "bt-pcm-sink.h"
+#include "audio.h"
 
 #include "bt-service.h"
 #include "crash_log.h"
@@ -132,6 +136,7 @@ static bool                   s_pending_switch;
 
 static uint16_t s_a2dp_cid;
 static uint8_t  s_local_seid;
+static uint16_t s_avrcp_cid;
 static bool     s_picked_valid;
 static struct bt_dev_info s_picked;
 
@@ -586,6 +591,64 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
     }
 }
 
+/* ---- AVRCP target: receive PASSTHROUGH commands from the sink (e.g.
+ *      Beats Fit Pro single-tap → PLAY/PAUSE) and route them to the
+ *      Rockbox playback engine. PLAY / PAUSE / FORWARD / BACKWARD
+ *      / STOP only; metadata, volume sync, and notifications back to
+ *      the sink are out of v1 scope.
+ *
+ *      All audio_*() entry points post to the audio queue and are
+ *      cross-thread safe, so calling them from the BT thread is fine. */
+
+static void avrcp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t size)
+{
+    (void)ch; (void)size;
+    if(type != HCI_EVENT_PACKET) return;
+    if(hci_event_packet_get_type(pkt) != HCI_EVENT_AVRCP_META) return;
+
+    switch(pkt[2]) {
+    case AVRCP_SUBEVENT_CONNECTION_ESTABLISHED: {
+        uint8_t st = avrcp_subevent_connection_established_get_status(pkt);
+        if(st != ERROR_CODE_SUCCESS) break;
+        s_avrcp_cid = avrcp_subevent_connection_established_get_avrcp_cid(pkt);
+        break;
+    }
+    case AVRCP_SUBEVENT_CONNECTION_RELEASED:
+        s_avrcp_cid = 0;
+        break;
+    default:
+        break;
+    }
+}
+
+static void avrcp_target_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t size)
+{
+    (void)ch; (void)size;
+    if(type != HCI_EVENT_PACKET) return;
+    if(hci_event_packet_get_type(pkt) != HCI_EVENT_AVRCP_META) return;
+    if(pkt[2] != AVRCP_SUBEVENT_OPERATION) return;
+
+    /* AVRCP PASSTHROUGH frames arrive twice (PRESS then RELEASE).
+     * Act on PRESS only so a single tap doesn't invoke twice. */
+    if(avrcp_subevent_operation_get_button_pressed(pkt) == 0) return;
+
+    avrcp_operation_id_t op =
+        (avrcp_operation_id_t)avrcp_subevent_operation_get_operation_id(pkt);
+
+    /* Map AVRCP operation → Rockbox playback API.
+     * STOP is mapped to pause (rather than audio_stop) so the user can
+     * resume from the bud without having to navigate Rockbox after a
+     * stray triple-tap. */
+    switch(op) {
+    case AVRCP_OPERATION_ID_PLAY:     audio_resume(); break;
+    case AVRCP_OPERATION_ID_PAUSE:    audio_pause();  break;
+    case AVRCP_OPERATION_ID_STOP:     audio_pause();  break;
+    case AVRCP_OPERATION_ID_FORWARD:  audio_next();   break;
+    case AVRCP_OPERATION_ID_BACKWARD: audio_prev();   break;
+    default: break;
+    }
+}
+
 /* ---- BT thread command processing ---- */
 
 static void do_connect(const struct bt_dev_info* d)
@@ -803,6 +866,34 @@ static void bt_thread_main(void)
                                   AVDTP_SOURCE_FEATURE_MASK_PLAYER,
                                   NULL, NULL);
     sdp_register_service(sdp_buf);
+
+    /* AVRCP target — receives PLAY/PAUSE/NEXT/PREV from the sink button.
+     * BTstack ties target and controller together at the protocol layer,
+     * so both halves get init'd even though we only consume target events.
+     * Two SDP records: target advertises CATEGORY_PLAYER_OR_RECORDER (the
+     * sink is allowed to send Category 1 commands like play/pause to us);
+     * controller advertises CATEGORY_MONITOR_OR_AMPLIFIER (we don't act
+     * on it in v1 but the sink expects to see it). */
+    avrcp_init();
+    avrcp_register_packet_handler(&avrcp_packet_handler);
+    avrcp_target_init();
+    avrcp_target_register_packet_handler(&avrcp_target_packet_handler);
+    avrcp_controller_init();
+    avrcp_controller_register_packet_handler(&avrcp_packet_handler);
+
+    static uint8_t sdp_avrcp_target_buf[200];
+    avrcp_target_create_sdp_record(sdp_avrcp_target_buf,
+        sdp_create_service_record_handle(),
+        AVRCP_FEATURE_MASK_CATEGORY_PLAYER_OR_RECORDER,
+        NULL, NULL);
+    sdp_register_service(sdp_avrcp_target_buf);
+
+    static uint8_t sdp_avrcp_controller_buf[200];
+    avrcp_controller_create_sdp_record(sdp_avrcp_controller_buf,
+        sdp_create_service_record_handle(),
+        AVRCP_FEATURE_MASK_CATEGORY_MONITOR_OR_AMPLIFIER,
+        NULL, NULL);
+    sdp_register_service(sdp_avrcp_controller_buf);
 
     gap_set_local_name("Rockbox F20");
     gap_set_class_of_device(0x240404);
