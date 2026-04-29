@@ -846,6 +846,21 @@ static void bt_thread_main(void)
      * playback. With link policy = 0 the local LM refuses sniff requests
      * from the peer, keeping the link in active mode for the duration. */
     gap_set_default_link_policy_settings(LM_LINK_POLICY_DISABLE_ALL_LM_MODES);
+    /* HCI Automatic Flush Timeout = 30 ms. With infinite (default) flush,
+     * a single bad slot causes a retransmit cascade — manifests as a
+     * multi-hundred-ms tear or 1-sec dropout on Beats Fit Pro. With a
+     * finite flush, an undeliverable L2CAP packet is dropped after 30 ms
+     * (~48 BT slots) and the next packet goes out on schedule, so a
+     * single bad slot becomes a ~20 ms inaudible gap instead of a tear.
+     *
+     * Side effect: this flips ALL classic L2CAP traffic on the ACL to
+     * automatically flushable (BTstack's packet-boundary-flag selector
+     * is global, not per-channel). AVRCP and AVDTP signaling are tiny
+     * and bursty — 30 ms is plenty of retry budget under normal RF — but
+     * under sustained heavy interference a stray button press could in
+     * theory get dropped. Acceptable trade for an audio source; user
+     * just taps again. */
+    gap_enable_link_watchdog(30);
     hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
 
     l2cap_init();
