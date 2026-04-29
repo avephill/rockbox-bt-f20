@@ -777,6 +777,12 @@ static void bt_thread_main(void)
     bt_tlv_init();
     hci_set_link_key_db(btstack_link_key_db_tlv_get_instance(&bt_tlv_impl, NULL));
     hci_set_master_slave_policy(0);
+    /* Forbid sniff/hold/park on all ACLs. Apple H1-class sinks (AirPods,
+     * Beats) try to enter sniff for battery; the active↔sniff transitions
+     * stall media for ~100 ms and show up as periodic hitching during
+     * playback. With link policy = 0 the local LM refuses sniff requests
+     * from the peer, keeping the link in active mode for the duration. */
+    gap_set_default_link_policy_settings(LM_LINK_POLICY_DISABLE_ALL_LM_MODES);
     hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
 
     l2cap_init();
