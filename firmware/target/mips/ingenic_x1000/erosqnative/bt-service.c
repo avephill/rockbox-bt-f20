@@ -135,10 +135,13 @@ static uint8_t  s_local_seid;
 static bool     s_picked_valid;
 static struct bt_dev_info s_picked;
 
-/* SBC capabilities: 44.1 kHz stereo, all block/subband modes. */
+/* SBC capabilities: 44.1 kHz stereo, all block/subband modes.
+ * max_bitpool capped at 35 (not the typical 53) — Apple H1-class sinks
+ * (AirPods/Beats) glitch on SBC at high bitpool; lower cap = smaller
+ * on-air frames = more retransmit headroom. ~240 kbps is still transparent. */
 static uint8_t sbc_caps[] = {
     (AVDTP_SBC_44100 << 4) | AVDTP_SBC_STEREO,
-    0xFF, 2, 53,
+    0xFF, 2, 35,
 };
 static uint8_t sbc_config[4];
 
