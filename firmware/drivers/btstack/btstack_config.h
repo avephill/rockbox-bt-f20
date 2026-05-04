@@ -36,7 +36,7 @@
 #define MAX_NR_GATT_SUBCLIENTS              1
 #define MAX_NR_AVDTP_STREAM_ENDPOINTS       2
 #define MAX_NR_AVDTP_CONNECTIONS            1
-#define MAX_NR_AVRCP_CONNECTIONS            1
+#define MAX_NR_AVRCP_CONNECTIONS            2
 #define MAX_NR_LE_DEVICE_DB_ENTRIES         0
 #define MAX_NR_LE_AUDIO_CIGS                0
 #define MAX_NR_LE_AUDIO_CISES               0

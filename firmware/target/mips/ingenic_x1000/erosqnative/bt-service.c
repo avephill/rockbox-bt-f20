@@ -512,6 +512,15 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
             if(b >= 0) s_picked = s_bonded[b];
             s_picked_valid = true;
         }
+        /* Initiate AVRCP from the source side. Many sinks (Beats Fit Pro
+         * confirmed) won't open an AVCTP channel on their own — they wait
+         * for the controller-capable peer to connect, then send PASSTHROUGH
+         * commands over the established channel. */
+        if(s_avrcp_cid == 0) {
+            uint16_t cid = 0;
+            uint8_t rc = avrcp_connect(addr, &cid);
+            set_status("avrcp_connect rc=%u", rc);
+        }
         break;
     }
     case A2DP_SUBEVENT_SIGNALING_MEDIA_CODEC_SBC_CONFIGURATION: {
@@ -609,14 +618,20 @@ static void avrcp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16
     switch(pkt[2]) {
     case AVRCP_SUBEVENT_CONNECTION_ESTABLISHED: {
         uint8_t st = avrcp_subevent_connection_established_get_status(pkt);
-        if(st != ERROR_CODE_SUCCESS) break;
+        if(st != ERROR_CODE_SUCCESS) {
+            set_status("avrcp fail %u", st);
+            break;
+        }
         s_avrcp_cid = avrcp_subevent_connection_established_get_avrcp_cid(pkt);
+        set_status("avrcp on cid=%04x", s_avrcp_cid);
         break;
     }
     case AVRCP_SUBEVENT_CONNECTION_RELEASED:
         s_avrcp_cid = 0;
+        set_status("avrcp off");
         break;
     default:
+        set_status("avrcp evt %02x", pkt[2]);
         break;
     }
 }
@@ -626,22 +641,41 @@ static void avrcp_target_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt,
     (void)ch; (void)size;
     if(type != HCI_EVENT_PACKET) return;
     if(hci_event_packet_get_type(pkt) != HCI_EVENT_AVRCP_META) return;
-    if(pkt[2] != AVRCP_SUBEVENT_OPERATION) return;
+
+    /* Show every target subevent so we can tell whether PASSTHROUGH is
+     * arriving but unhandled, vs. nothing arriving at all. */
+    if(pkt[2] != AVRCP_SUBEVENT_OPERATION) {
+        set_status("avrcp tgt evt %02x", pkt[2]);
+        return;
+    }
+
+    bool pressed = avrcp_subevent_operation_get_button_pressed(pkt) > 0;
+    avrcp_operation_id_t op =
+        (avrcp_operation_id_t)avrcp_subevent_operation_get_operation_id(pkt);
+
+    set_status("avrcp op=%02x %s", (unsigned)op, pressed ? "pr" : "rel");
 
     /* AVRCP PASSTHROUGH frames arrive twice (PRESS then RELEASE).
      * Act on PRESS only so a single tap doesn't invoke twice. */
-    if(avrcp_subevent_operation_get_button_pressed(pkt) == 0) return;
-
-    avrcp_operation_id_t op =
-        (avrcp_operation_id_t)avrcp_subevent_operation_get_operation_id(pkt);
+    if(!pressed) return;
 
     /* Map AVRCP operation → Rockbox playback API.
      * STOP is mapped to pause (rather than audio_stop) so the user can
      * resume from the bud without having to navigate Rockbox after a
-     * stray triple-tap. */
+     * stray triple-tap.
+     *
+     * PLAY and PAUSE are both treated as a toggle against current playback
+     * state. Apple H1 buds (Beats Fit Pro) only ever send PAUSE because
+     * without our playback-status notifications they assume the source is
+     * still in the "playing" state, so a non-toggling map would only work
+     * for the very first tap. */
+    int st = audio_status();
+    bool playing = (st & AUDIO_STATUS_PLAY) && !(st & AUDIO_STATUS_PAUSE);
     switch(op) {
-    case AVRCP_OPERATION_ID_PLAY:     audio_resume(); break;
-    case AVRCP_OPERATION_ID_PAUSE:    audio_pause();  break;
+    case AVRCP_OPERATION_ID_PLAY:
+    case AVRCP_OPERATION_ID_PAUSE:
+        if(playing) audio_pause(); else audio_resume();
+        break;
     case AVRCP_OPERATION_ID_STOP:     audio_pause();  break;
     case AVRCP_OPERATION_ID_FORWARD:  audio_next();   break;
     case AVRCP_OPERATION_ID_BACKWARD: audio_prev();   break;
