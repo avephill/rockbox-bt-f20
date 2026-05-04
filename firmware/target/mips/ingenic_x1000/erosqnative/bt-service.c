@@ -846,6 +846,20 @@ static void bt_thread_main(void)
      * playback. With link policy = 0 the local LM refuses sniff requests
      * from the peer, keeping the link in active mode for the duration. */
     gap_set_default_link_policy_settings(LM_LINK_POLICY_DISABLE_ALL_LM_MODES);
+    /* Restrict ACL packet types to basic-rate (1 Mbps GFSK) only — disable
+     * EDR 2-DH* / 3-DH* on all classic links. EDR needs ~5-9 dB more SNR
+     * than BR to stay below threshold; in a body-blocking null (e.g. F20
+     * in breast pocket, head turned to put the skull between source and
+     * primary bud) that's exactly the margin lost, and EDR drops into a
+     * retransmit cascade that the user hears as a multi-hundred-ms tear
+     * or a sustained dropout. BR rides through the same null with frame
+     * loss instead of cascade collapse.
+     *
+     * Bandwidth check: SBC bitpool 35, 44.1 kHz, joint stereo is ~250 kbps
+     * payload. 1-DH5 carries ~700 kbps usable, so BR has ample headroom
+     * and we lose no audio quality. Bose / Redmi / similar sinks are
+     * unaffected — they were never bandwidth-limited at our bitpool. */
+    hci_enable_acl_packet_types(ACL_PACKET_TYPES_BR);
     hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
 
     l2cap_init();
