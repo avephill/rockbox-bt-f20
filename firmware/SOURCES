@@ -1820,6 +1820,7 @@ target/mips/ingenic_x1000/erosqnative/bt-pcm-sink.c
 target/mips/ingenic_x1000/erosqnative/bt-tlv.c
 target/mips/ingenic_x1000/erosqnative/bt-service.c
 target/mips/ingenic_x1000/erosqnative/bt-link-log.c
+target/mips/ingenic_x1000/erosqnative/bt-aac-encoder-stub.c
 /* BTstack core */
 drivers/btstack/src/hci.c
 drivers/btstack/src/hci_cmd.c
