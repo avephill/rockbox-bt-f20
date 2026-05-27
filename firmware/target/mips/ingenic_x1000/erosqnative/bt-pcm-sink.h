@@ -11,11 +11,29 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Configure the encoder with parameters negotiated by AVDTP. Call on
- * A2DP_SUBEVENT_SIGNALING_MEDIA_CODEC_SBC_CONFIGURATION. */
+/* Active codec. Selected by bt-service on AVDTP MEDIA_CODEC_*_CONFIGURATION,
+ * which arrives just before STREAM_ESTABLISHED. The set_*_config calls
+ * implicitly latch the codec. */
+enum bt_pcm_codec {
+    BT_PCM_CODEC_SBC = 0,
+    BT_PCM_CODEC_AAC,
+};
+
+/* Configure the SBC encoder with parameters negotiated by AVDTP. Call on
+ * A2DP_SUBEVENT_SIGNALING_MEDIA_CODEC_SBC_CONFIGURATION. Latches codec=SBC. */
 void bt_pcm_sink_set_sbc_config(uint16_t freq, uint8_t block_length,
                                  uint8_t subbands, uint8_t alloc, uint8_t chmode,
                                  uint8_t max_bitpool);
+
+/* Configure the AAC encoder. Call on AAC MEDIA_CODEC configuration event.
+ * Latches codec=AAC. The active encoder backend is whichever was selected
+ * at compile time via BT_AAC_BACKEND in bt-aac-encoder.h (default = stub,
+ * which produces silence — see comments there). */
+void bt_pcm_sink_set_aac_config(uint32_t sample_rate, uint8_t channels,
+                                 uint32_t bit_rate, bool vbr);
+
+/* Active codec (for status/diag). */
+enum bt_pcm_codec bt_pcm_sink_get_codec(void);
 
 /* Start the pacing timer and arm the encoder pipeline. Call on
  * A2DP_SUBEVENT_STREAM_STARTED. */

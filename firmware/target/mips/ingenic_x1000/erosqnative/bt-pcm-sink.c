@@ -31,6 +31,7 @@
 #include "classic/btstack_sbc.h"
 #include "classic/btstack_sbc_bluedroid.h"
 #include "bt-link-log.h"
+#include "bt-aac-encoder.h"
 
 /* Native sample type from Rockbox playback. F20 is PCM_NATIVE_BITDEPTH=24
  * meaning 24-bit signed values stored LSB-aligned in 32-bit containers
@@ -65,6 +66,15 @@ static bool     s_active;       /* true between start/stop_streaming */
 static uint16_t s_a2dp_cid;
 static uint8_t  s_local_seid;
 
+/* Active codec — set by bt_pcm_sink_set_*_config from bt-service when
+ * the AVDTP layer notifies which codec the sink picked. Drives all the
+ * dispatch in audio_tick / handle_can_send_now / send_media_packet. */
+static enum bt_pcm_codec s_codec = BT_PCM_CODEC_SBC;
+
+/* Negotiated sample rate, in Hz. Used to convert wall-clock ms into a
+ * sample-count budget for audio_tick. SBC and AAC both populate this. */
+static uint32_t s_sample_rate;
+
 /* ---- SBC encoder ---- */
 static const btstack_sbc_encoder_t* s_sbc_encoder;
 static btstack_sbc_encoder_bluedroid_t s_sbc_state;
@@ -77,12 +87,38 @@ static struct {
     btstack_sbc_allocation_method_t allocation_method;
 } s_sbc_cfg;
 
-/* ---- packet assembly ---- */
+/* ---- packet assembly (SBC: aggregate N frames per packet) ---- */
 #define SBC_STORAGE_SIZE 1030
 static uint8_t  s_sbc_storage[SBC_STORAGE_SIZE];
 static int      s_sbc_storage_count;
 static int      s_sbc_ready_to_send;
 static int      s_max_payload;
+
+/* ---- AAC encoder ----
+ *
+ * AAC LC always consumes 1024 stereo samples per frame and produces a
+ * variable-size raw bitstream (no ADTS/LATM wrapper — A2DP packs raw
+ * AAC frames directly into the AVDTP media payload, no per-frame header
+ * byte the way SBC has). One frame per RTP packet is the standard,
+ * simplest, and BFP-friendly choice.
+ *
+ * AAC_PAYLOAD_SIZE budgets a generous 1 KB — actual AAC LC stereo at
+ * <=256 kbps tops out around 700 bytes/frame in practice. The eventual
+ * real encoder must respect bt_aac_encoder_max_output() (which this
+ * code sizes against on start_streaming). */
+#define AAC_PAYLOAD_SIZE 1024
+static bt_aac_encoder_t* s_aac_enc;
+static unsigned          s_aac_input_samples;   /* PCM samples per encode call */
+static unsigned          s_aac_max_output;
+static uint8_t           s_aac_payload[AAC_PAYLOAD_SIZE];
+static int               s_aac_payload_size;    /* bytes pending send (0 = empty) */
+static int               s_aac_ready_to_send;
+static struct {
+    uint32_t sample_rate;
+    uint8_t  channels;
+    uint32_t bit_rate;
+    bool     vbr;
+} s_aac_cfg;
 
 /* ---- audio pacing ----
  *
@@ -188,33 +224,58 @@ static void fill_sbc(void)
     }
 }
 
-static void send_media_packet(void)
+/* Common post-send bookkeeping: stretch detector + log non-zero rc.
+ * Called by both codecs' send paths so the link-log signal is consistent
+ * regardless of which codec is active. */
+static void post_send(uint8_t rc, unsigned bytes)
+{
+    s_packets_sent++;
+    if(rc != 0) bt_link_logf("send rc=%u b=%u", rc, bytes);
+    uint32_t now = btstack_run_loop_get_time_ms();
+    if(s_last_send_ms != 0) {
+        uint32_t dt = now - s_last_send_ms;
+        /* Send-stretch detector: see comment on s_last_send_ms. 50 ms = ~5
+         * missed canonical sends, well outside normal jitter and safely
+         * below the audio underrun horizon. */
+        if(dt > 50) bt_link_logf("send gap %u ms", dt);
+    }
+    s_last_send_ms = now;
+}
+
+static void send_sbc_packet(void)
 {
     uint16_t sbc_frame_size = s_sbc_encoder->sbc_buffer_length(&s_sbc_state);
     uint8_t num_frames = s_sbc_storage_count / sbc_frame_size;
     s_sbc_storage[0] = num_frames;   /* SBC media payload header */
+    unsigned bytes = s_sbc_storage_count + 1;
     uint8_t rc = a2dp_source_stream_send_media_payload_rtp(
         s_a2dp_cid, s_local_seid, 0, s_rtp_ts,
-        s_sbc_storage, s_sbc_storage_count + 1);
+        s_sbc_storage, bytes);
     unsigned samples_per_frame = s_sbc_encoder->num_audio_frames(&s_sbc_state);
     s_rtp_ts            += num_frames * samples_per_frame;
     s_sbc_storage_count  = 0;
     s_sbc_ready_to_send  = 0;
-    s_packets_sent++;
+    post_send(rc, bytes);
+}
 
-    if(rc != 0) {
-        bt_link_logf("send rc=%u nf=%u", rc, num_frames);
+/* AAC: 1 frame per RTP packet, no payload header. RTP timestamp advances
+ * by 1024 (the AAC LC frame's fundamental sample count) per packet. */
+static void send_aac_packet(void)
+{
+    if(s_aac_payload_size <= 0) {
+        /* Stub backend produces 0 bytes — nothing to send. Clear the gate
+         * so audio_tick can keep accumulating samples and re-arm send. */
+        s_aac_ready_to_send = 0;
+        return;
     }
-    /* Send-stretch detector: if the gap from the previous successful send
-     * is well above the canonical 10 ms cadence we are stalled at the
-     * controller/RF layer. Threshold 50 ms = ~5 missed sends, well outside
-     * normal jitter and safely below the audio buffer's underrun horizon. */
-    uint32_t now = btstack_run_loop_get_time_ms();
-    if(s_last_send_ms != 0) {
-        uint32_t dt = now - s_last_send_ms;
-        if(dt > 50) bt_link_logf("send gap %u ms", dt);
-    }
-    s_last_send_ms = now;
+    uint8_t rc = a2dp_source_stream_send_media_payload_rtp(
+        s_a2dp_cid, s_local_seid, 0, s_rtp_ts,
+        s_aac_payload, (uint16_t)s_aac_payload_size);
+    s_rtp_ts            += s_aac_input_samples;
+    int sent_bytes       = s_aac_payload_size;
+    s_aac_payload_size   = 0;
+    s_aac_ready_to_send  = 0;
+    post_send(rc, (unsigned)sent_bytes);
 }
 
 static void audio_tick(btstack_timer_source_t* t)
@@ -224,19 +285,47 @@ static void audio_tick(btstack_timer_source_t* t)
     btstack_run_loop_set_timer(&s_audio_timer, AUDIO_TIMEOUT_MS);
     btstack_run_loop_add_timer(&s_audio_timer);
 
+    /* Sample-budget accumulation is codec-agnostic — based purely on the
+     * negotiated sample rate and the wall-clock delta since the last tick.
+     * Mirrors the original SBC-only code; just sourced from s_sample_rate
+     * rather than s_sbc_cfg.freq so AAC fills with the same logic. */
     uint32_t now = btstack_run_loop_get_time_ms();
     uint32_t dt  = s_time_sent_ms ? (now - s_time_sent_ms) : AUDIO_TIMEOUT_MS;
-    uint32_t n   = (dt * s_sbc_cfg.freq) / 1000;
-    s_acc_missed += (dt * s_sbc_cfg.freq) % 1000;
+    uint32_t n   = (dt * s_sample_rate) / 1000;
+    s_acc_missed += (dt * s_sample_rate) % 1000;
     while (s_acc_missed >= 1000) { n++; s_acc_missed -= 1000; }
     s_time_sent_ms   = now;
     s_samples_ready += n;
 
-    if (s_sbc_ready_to_send) return;
-    fill_sbc();
-    uint16_t frame_sz = s_sbc_encoder->sbc_buffer_length(&s_sbc_state);
-    if ((uint32_t)(s_sbc_storage_count + frame_sz) > (uint32_t)s_max_payload) {
-        s_sbc_ready_to_send = 1;
+    if(s_codec == BT_PCM_CODEC_SBC) {
+        if (s_sbc_ready_to_send) return;
+        fill_sbc();
+        uint16_t frame_sz = s_sbc_encoder->sbc_buffer_length(&s_sbc_state);
+        if ((uint32_t)(s_sbc_storage_count + frame_sz) > (uint32_t)s_max_payload) {
+            s_sbc_ready_to_send = 1;
+            a2dp_source_stream_endpoint_request_can_send_now(s_a2dp_cid, s_local_seid);
+        }
+    } else {
+        /* AAC: one frame per packet. Encode as soon as we have a frame's
+         * worth of samples and the previous send is done, then request
+         * can_send_now and let send_aac_packet ship it.
+         *
+         * The 4 KB PCM scratch buffer lives at file scope rather than on
+         * stack — the BT thread's stack is only 8.5 KB and we don't want
+         * audio_tick reentrant-ish use to push it close. */
+        static int16_t aac_pcm[1024 * 2];
+        if (s_aac_ready_to_send || s_aac_payload_size > 0) return;
+        if (!s_aac_enc || s_samples_ready < s_aac_input_samples) return;
+        pull_pcm(aac_pcm, s_aac_input_samples);
+        s_samples_ready -= s_aac_input_samples;
+        int out = bt_aac_encoder_encode(s_aac_enc, aac_pcm, s_aac_input_samples,
+                                         s_aac_payload, sizeof(s_aac_payload));
+        if(out < 0) {
+            bt_link_logf("aac enc err %d", out);
+            return;
+        }
+        s_aac_payload_size  = out;
+        s_aac_ready_to_send = 1;
         a2dp_source_stream_endpoint_request_can_send_now(s_a2dp_cid, s_local_seid);
     }
 }
@@ -247,6 +336,8 @@ void bt_pcm_sink_set_sbc_config(uint16_t freq, uint8_t block_length,
                                  uint8_t subbands, uint8_t alloc, uint8_t chmode,
                                  uint8_t max_bitpool)
 {
+    s_codec                = BT_PCM_CODEC_SBC;
+    s_sample_rate          = freq;
     s_sbc_cfg.freq         = freq;
     s_sbc_cfg.block_length = block_length;
     s_sbc_cfg.subbands     = subbands;
@@ -271,6 +362,31 @@ void bt_pcm_sink_set_sbc_config(uint16_t freq, uint8_t block_length,
                               s_sbc_cfg.channel_mode);
 }
 
+void bt_pcm_sink_set_aac_config(uint32_t sample_rate, uint8_t channels,
+                                 uint32_t bit_rate, bool vbr)
+{
+    s_codec              = BT_PCM_CODEC_AAC;
+    s_sample_rate        = sample_rate;
+    s_aac_cfg.sample_rate = sample_rate;
+    s_aac_cfg.channels    = channels;
+    s_aac_cfg.bit_rate    = bit_rate;
+    s_aac_cfg.vbr         = vbr;
+
+    /* Tear down any previous encoder before allocating a fresh one — the
+     * sink can be re-configured if the peer renegotiates. */
+    if(s_aac_enc) { bt_aac_encoder_free(s_aac_enc); s_aac_enc = NULL; }
+    s_aac_enc = bt_aac_encoder_init(sample_rate, channels, bit_rate, vbr);
+    if(s_aac_enc) {
+        s_aac_input_samples = bt_aac_encoder_input_samples(s_aac_enc);
+        s_aac_max_output    = bt_aac_encoder_max_output(s_aac_enc);
+    } else {
+        s_aac_input_samples = 1024;     /* fallback so audio_tick doesn't spin */
+        s_aac_max_output    = 0;
+    }
+}
+
+enum bt_pcm_codec bt_pcm_sink_get_codec(void) { return s_codec; }
+
 void bt_pcm_sink_start_streaming(uint16_t a2dp_cid, uint8_t local_seid)
 {
     s_a2dp_cid           = a2dp_cid;
@@ -280,6 +396,8 @@ void bt_pcm_sink_start_streaming(uint16_t a2dp_cid, uint8_t local_seid)
                                ? max_payload : SBC_STORAGE_SIZE;
     s_sbc_storage_count  = 0;
     s_sbc_ready_to_send  = 0;
+    s_aac_payload_size   = 0;
+    s_aac_ready_to_send  = 0;
     s_time_sent_ms       = 0;
     s_acc_missed         = 0;
     s_samples_ready      = 0;
@@ -300,6 +418,7 @@ void bt_pcm_sink_stop_streaming(void)
     s_streaming = false;
     s_active    = false;
     btstack_run_loop_remove_timer(&s_audio_timer);
+    if(s_aac_enc) { bt_aac_encoder_free(s_aac_enc); s_aac_enc = NULL; }
 }
 
 bool bt_pcm_sink_is_active(void)
@@ -309,9 +428,9 @@ bool bt_pcm_sink_is_active(void)
 
 void bt_pcm_sink_handle_can_send_now(void)
 {
-    /* Just clear the back-pressure block. audio_tick will pick up sending
-     * again on the next iteration (and may now send multiple packets). */
-    if (s_streaming) send_media_packet();
+    if(!s_streaming) return;
+    if(s_codec == BT_PCM_CODEC_SBC) send_sbc_packet();
+    else                            send_aac_packet();
 }
 
 uint32_t bt_pcm_sink_packets_sent(void)
