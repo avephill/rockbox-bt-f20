@@ -1821,6 +1821,25 @@ target/mips/ingenic_x1000/erosqnative/bt-tlv.c
 target/mips/ingenic_x1000/erosqnative/bt-service.c
 target/mips/ingenic_x1000/erosqnative/bt-link-log.c
 target/mips/ingenic_x1000/erosqnative/bt-aac-encoder-stub.c
+target/mips/ingenic_x1000/erosqnative/bt-aac-encoder-faac.c
+#ifdef BT_AAC_USE_FAAC
+/* FAAC encoder source (LGPL 2.1+, knik0/faac). Vendored by running
+ * firmware/target/mips/ingenic_x1000/erosqnative/vendor-faac.sh after
+ * setting BT_AAC_USE_FAAC in erosqnative.h. */
+drivers/btstack/3rd-party/faac/libfaac/bitstream.c
+drivers/btstack/3rd-party/faac/libfaac/blockswitch.c
+drivers/btstack/3rd-party/faac/libfaac/channels.c
+drivers/btstack/3rd-party/faac/libfaac/cpu_compute.c
+drivers/btstack/3rd-party/faac/libfaac/fft.c
+drivers/btstack/3rd-party/faac/libfaac/filtbank.c
+drivers/btstack/3rd-party/faac/libfaac/frame.c
+drivers/btstack/3rd-party/faac/libfaac/huff2.c
+drivers/btstack/3rd-party/faac/libfaac/huffdata.c
+drivers/btstack/3rd-party/faac/libfaac/quantize.c
+drivers/btstack/3rd-party/faac/libfaac/stereo.c
+drivers/btstack/3rd-party/faac/libfaac/tns.c
+drivers/btstack/3rd-party/faac/libfaac/util.c
+#endif
 /* BTstack core */
 drivers/btstack/src/hci.c
 drivers/btstack/src/hci_cmd.c

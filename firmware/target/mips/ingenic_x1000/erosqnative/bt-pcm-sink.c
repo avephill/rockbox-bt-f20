@@ -324,6 +324,12 @@ static void audio_tick(btstack_timer_source_t* t)
             bt_link_logf("aac enc err %d", out);
             return;
         }
+        if(out == 0) {
+            /* Encoder is priming (FAAC and most LC encoders return 0 bytes
+             * for the first few frames while their analysis lookahead fills).
+             * Samples are consumed; just try again next tick. */
+            return;
+        }
         s_aac_payload_size  = out;
         s_aac_ready_to_send = 1;
         a2dp_source_stream_endpoint_request_can_send_now(s_a2dp_cid, s_local_seid);

@@ -27,6 +27,18 @@
 #define HAVE_BT_PCM_SINK
 #endif
 
+/* Enable AAC as an advertised codec on the A2DP source endpoint. Requires
+ * the FAAC encoder source to be vendored under
+ * firmware/drivers/btstack/3rd-party/faac/ — run
+ *   firmware/target/mips/ingenic_x1000/erosqnative/vendor-faac.sh
+ * to populate it. Without this, only SBC is offered (the default we shipped
+ * before AAC work began).
+ *
+ * Why this is gated: an AAC endpoint advertised with our stub encoder
+ * backend would make BFP / AirPods pick AAC over SBC and then receive
+ * silence. Better to keep SBC-only until the real encoder is in place. */
+/* #define BT_AAC_USE_FAAC */
+
 /* CPU defines */
 #define CONFIG_CPU      X1000
 #define X1000_EXCLK_FREQ   24000000

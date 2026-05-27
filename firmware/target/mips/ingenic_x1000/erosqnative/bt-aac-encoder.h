@@ -33,14 +33,24 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Backend selector. Exactly one .c file's BT_AAC_BACKEND must match this
- * value; the others compile to nothing. Defaults to STUB so SBC users
- * pay no link cost beyond a few-byte no-op encoder. */
+/* Backend selector. Exactly one .c file's BT_AAC_BACKEND match wins; the
+ * others compile to nothing. Defaults to STUB so a stock build still
+ * negotiates SBC only and pays no encoder link cost.
+ *
+ * Users enable FAAC by defining BT_AAC_USE_FAAC in their target config
+ * (firmware/export/config/erosqnative.h) AFTER running vendor-faac.sh to
+ * place the encoder source under firmware/drivers/btstack/3rd-party/faac/. */
+#include "config.h"
+
 #define BT_AAC_BACKEND_STUB 0
 #define BT_AAC_BACKEND_FAAC 1
 
 #ifndef BT_AAC_BACKEND
-#define BT_AAC_BACKEND BT_AAC_BACKEND_STUB
+# ifdef BT_AAC_USE_FAAC
+#  define BT_AAC_BACKEND BT_AAC_BACKEND_FAAC
+# else
+#  define BT_AAC_BACKEND BT_AAC_BACKEND_STUB
+# endif
 #endif
 
 typedef struct bt_aac_encoder bt_aac_encoder_t;
