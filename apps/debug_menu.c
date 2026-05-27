@@ -2834,6 +2834,7 @@ extern bool dbg_bt_diag(void);
 extern bool dbg_bt_inquiry(void);
 extern bool dbg_bt_pair(void);
 extern bool dbg_bt_a2dp(void);
+extern bool dbg_bt_linklog(void);
 #endif
 
 static const struct {
@@ -2892,6 +2893,7 @@ static const struct {
         { "BT Inquiry",    dbg_bt_inquiry },
         { "BT Pair",       dbg_bt_pair },
         { "BT A2DP",       dbg_bt_a2dp },
+        { "BT Link Log",   dbg_bt_linklog },
 #endif
 #if (CONFIG_PLATFORM & PLATFORM_NATIVE)
         { "View partitions", dbg_partitions },

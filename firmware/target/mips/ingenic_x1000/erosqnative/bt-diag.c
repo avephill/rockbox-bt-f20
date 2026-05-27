@@ -39,6 +39,10 @@ extern const btstack_uart_t * btstack_uart_block_embedded_instance(void);
 #include "classic/sdp_server.h"
 #include "l2cap.h"
 
+#include "bt-link-log.h"
+#include "bt-pcm-sink.h"
+#include "bt-service.h"
+
 static void putline(int* row, const char* s)
 {
     lcd_puts(0, (*row)++, s);
@@ -534,6 +538,102 @@ done:
     lcd_puts(0, 15, "BACK to exit");
     lcd_update();
     while(get_action(CONTEXT_STD, HZ) != ACTION_STD_CANCEL);
+    return false;
+}
+
+/* ============================================================================
+ * BT Link Log viewer — scrollable view of the bt-link-log ring buffer.
+ *
+ * Purpose: walk around with the F20 streaming to BFP, induce a cutout, then
+ * open this screen to see which HCI/send events landed during the bad
+ * window. The log is also writeable while this screen is open — entries
+ * scroll into view in real time, so you can watch live during a head-turn
+ * cutout if the player is still in your pocket and you can see the screen.
+ *
+ * Keys:
+ *   BACK    — leave the screen (log keeps running)
+ *   MENU    — reset the log (start a fresh capture)
+ *   UP/DOWN — scroll
+ *   PLAY    — jump to bottom (latest)
+ * ============================================================================ */
+
+static int s_log_scroll;        /* offset of top visible entry */
+static bool s_log_follow = true;/* true = stay pinned to newest; reset on first scroll */
+
+static void log_redraw(void)
+{
+    lcd_clear_display();
+    lcd_setfont(FONT_SYSFIXED);
+
+    int count = bt_link_log_count();
+    uint32_t total = bt_link_log_total();
+    int per_screen = LCD_HEIGHT / 8 - 2;     /* SYSFIXED is 8px tall; keep header+footer */
+    if(per_screen < 4) per_screen = 4;
+
+    /* Pin to bottom by default so newest events stay visible. */
+    if(s_log_follow) {
+        s_log_scroll = count - per_screen;
+        if(s_log_scroll < 0) s_log_scroll = 0;
+    } else {
+        if(s_log_scroll > count - per_screen) s_log_scroll = count - per_screen;
+        if(s_log_scroll < 0) s_log_scroll = 0;
+    }
+
+    char hdr[48];
+    enum bt_state st = bt_service_get_state();
+    const char* state_name = (st == BT_STATE_STREAMING) ? "STREAM"
+                            : (st == BT_STATE_CONNECTING) ? "CONN"
+                            : (st == BT_STATE_READY)     ? "READY"
+                            : "----";
+    uint32_t pkts = bt_pcm_sink_packets_sent();
+    snprintf(hdr, sizeof(hdr), "Link log %d/%u [%s] tx=%lu",
+             count, (unsigned)total, state_name, (unsigned long)pkts);
+    lcd_puts(0, 0, hdr);
+
+    int row = 1;
+    for(int i = 0; i < per_screen; i++) {
+        int idx = s_log_scroll + i;
+        if(idx >= count) break;
+        uint32_t ts;
+        char msg[BT_LINK_LOG_MSG_LEN];
+        if(!bt_link_log_get(idx, &ts, msg, sizeof(msg))) break;
+        /* Print as seconds.tenths so a 4+ minute capture fits in the prefix. */
+        char line[80];
+        snprintf(line, sizeof(line), "%5u.%01u %s",
+                 (unsigned)(ts / 1000u),
+                 (unsigned)((ts / 100u) % 10u),
+                 msg);
+        lcd_puts(0, row++, line);
+    }
+
+    /* Footer: tell the user the controls. */
+    lcd_puts(0, LCD_HEIGHT/8 - 1, "MENU=reset PLAY=botm BACK");
+    lcd_update();
+}
+
+bool dbg_bt_linklog(void)
+{
+    s_log_scroll = 0;
+    s_log_follow = true;
+    while(true) {
+        log_redraw();
+        int act = get_action(CONTEXT_STD, HZ / 4);     /* 250 ms repaint */
+        if(act == ACTION_STD_CANCEL) break;
+        if(act == ACTION_STD_MENU) {
+            bt_link_log_reset();
+            s_log_scroll = 0;
+            s_log_follow = true;
+        } else if(act == ACTION_STD_OK) {
+            /* PLAY = jump to newest. */
+            s_log_follow = true;
+        } else if(act == ACTION_STD_PREV || act == ACTION_STD_PREVREPEAT) {
+            s_log_follow = false;
+            if(s_log_scroll > 0) s_log_scroll--;
+        } else if(act == ACTION_STD_NEXT || act == ACTION_STD_NEXTREPEAT) {
+            s_log_follow = false;
+            s_log_scroll++;
+        }
+    }
     return false;
 }
 #endif /* BOOTLOADER */

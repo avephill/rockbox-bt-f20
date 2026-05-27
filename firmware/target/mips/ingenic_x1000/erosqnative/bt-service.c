@@ -66,6 +66,7 @@
 #include "audio.h"
 
 #include "bt-service.h"
+#include "bt-link-log.h"
 #include "crash_log.h"
 
 extern const btstack_uart_t * btstack_uart_block_embedded_instance(void);
@@ -433,7 +434,8 @@ static void hci_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t
     if(type != HCI_EVENT_PACKET) return;
     bd_addr_t addr;
 
-    switch(hci_event_packet_get_type(pkt)) {
+    uint8_t evt = hci_event_packet_get_type(pkt);
+    switch(evt) {
     case BTSTACK_EVENT_STATE:
         if(btstack_event_state_get_state(pkt) == HCI_STATE_WORKING
            && s_state == BT_STATE_ENABLING) {
@@ -468,10 +470,88 @@ static void hci_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t
         hci_event_user_confirmation_request_get_bd_addr(pkt, addr);
         gap_ssp_confirmation_response(addr);
         break;
-    case HCI_EVENT_DISCONNECTION_COMPLETE:
-        /* AVDTP layer will follow up with STREAM_RELEASED; reset state there. */
-        if(pkt[5] != 0) set_status("dis rsn=%02x", pkt[5]);
+
+    /* --- Diagnostic instrumentation (see bt-link-log.h).
+     *
+     * We log link-level events that plausibly correlate with audio
+     * cutouts on the Beats Fit Pro path. The current hypothesis space:
+     *
+     *   - MODE_CHANGE to sniff (0x02): our default policy refuses sniff,
+     *     but a slow race between the live ACL coming up and the policy
+     *     taking effect would show up here. If we ever see "mode=02"
+     *     during a stream we know to nail the policy on the live handle.
+     *   - ROLE_CHANGE: we don't request role switch; if the peer forces
+     *     one mid-stream it adds ~20-100 ms of dead air.
+     *   - FLUSH_OCCURRED: controller dropped a media packet because of a
+     *     pending flush timeout. We disabled the watchdog (gotcha 25), so
+     *     this should never fire — if it does, something else (peer,
+     *     BTstack internals) is requesting flushes.
+     *   - MAX_SLOTS_CHANGED / PACKET_TYPE_CHANGED: the negotiated radio
+     *     packet length / type set. Useful to confirm BR-only stuck.
+     *   - QOS_VIOLATION: the controller says the active QoS contract
+     *     was missed for a window of time → likely cluster of retransmits.
+     *
+     * CONNECTION_COMPLETE doubles as our "fresh session" marker — wipe
+     * the log so the user only sees events from the run they care about.
+     */
+    case HCI_EVENT_CONNECTION_COMPLETE: {
+        uint8_t  st  = pkt[2];
+        uint16_t hnd = pkt[3] | (pkt[4] << 8);
+        bt_link_log_reset();
+        bt_link_logf("conn st=%u hnd=%04x", st, hnd);
         break;
+    }
+    case HCI_EVENT_DISCONNECTION_COMPLETE: {
+        uint16_t hnd = pkt[3] | (pkt[4] << 8);
+        uint8_t  rsn = pkt[5];
+        bt_link_logf("disc hnd=%04x rsn=%02x", hnd, rsn);
+        /* AVDTP layer will follow up with STREAM_RELEASED; reset state there. */
+        if(rsn != 0) set_status("dis rsn=%02x", rsn);
+        break;
+    }
+    case HCI_EVENT_FLUSH_OCCURRED: {
+        uint16_t hnd = pkt[2] | (pkt[3] << 8);
+        bt_link_logf("FLUSH hnd=%04x", hnd);
+        break;
+    }
+    case HCI_EVENT_ROLE_CHANGE: {
+        uint8_t  st   = pkt[2];
+        uint8_t  role = pkt[9];
+        bt_link_logf("role st=%u r=%u", st, role);
+        break;
+    }
+    case HCI_EVENT_MODE_CHANGE: {
+        uint8_t  st       = pkt[2];
+        uint16_t hnd      = pkt[3] | (pkt[4] << 8);
+        uint8_t  mode     = pkt[5];
+        uint16_t interval = pkt[6] | (pkt[7] << 8);
+        bt_link_logf("mode st=%u h=%04x m=%u iv=%u", st, hnd, mode, interval);
+        break;
+    }
+    case HCI_EVENT_MAX_SLOTS_CHANGED: {
+        uint16_t hnd  = pkt[2] | (pkt[3] << 8);
+        uint8_t  lmps = pkt[4];
+        bt_link_logf("slots h=%04x max=%u", hnd, lmps);
+        break;
+    }
+    case HCI_EVENT_CONNECTION_PACKET_TYPE_CHANGED: {
+        uint8_t  st   = pkt[2];
+        uint16_t hnd  = pkt[3] | (pkt[4] << 8);
+        uint16_t types = pkt[5] | (pkt[6] << 8);
+        bt_link_logf("ptype st=%u h=%04x t=%04x", st, hnd, types);
+        break;
+    }
+    case HCI_EVENT_QOS_VIOLATION: {
+        uint16_t hnd = pkt[2] | (pkt[3] << 8);
+        bt_link_logf("QOSV h=%04x", hnd);
+        break;
+    }
+    case HCI_EVENT_LINK_SUPERVISION_TIMEOUT_CHANGED: {
+        uint16_t hnd = pkt[2] | (pkt[3] << 8);
+        uint16_t to  = pkt[4] | (pkt[5] << 8);
+        bt_link_logf("lsup h=%04x to=%u", hnd, to);
+        break;
+    }
     default:
         break;
     }

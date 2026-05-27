@@ -30,6 +30,7 @@
 #include "classic/avdtp.h"
 #include "classic/btstack_sbc.h"
 #include "classic/btstack_sbc_bluedroid.h"
+#include "bt-link-log.h"
 
 /* Native sample type from Rockbox playback. F20 is PCM_NATIVE_BITDEPTH=24
  * meaning 24-bit signed values stored LSB-aligned in 32-bit containers
@@ -99,6 +100,13 @@ static uint32_t s_acc_missed;
 static uint32_t s_samples_ready;
 static uint32_t s_rtp_ts;
 static uint32_t s_packets_sent;
+/* Time of last successful media-packet send (BTstack run-loop ms). Used to
+ * detect "send stretches" — gaps when the controller-side ACL queue is
+ * stalled (typically retransmit cascades). A healthy session sends one
+ * packet every ~10 ms; sustained gaps > 50 ms correlate strongly with
+ * audible glitches/cutouts and tell us this isn't a host-side or sink-side
+ * issue but a controller/RF one. Logged via bt-link-log. */
+static uint32_t s_last_send_ms;
 
 /* Pull `num_frames` of stereo PCM into `pcm` from the current sink buffer.
  * Fetches the next buffer from the upper layer when exhausted. Pads with
@@ -185,7 +193,7 @@ static void send_media_packet(void)
     uint16_t sbc_frame_size = s_sbc_encoder->sbc_buffer_length(&s_sbc_state);
     uint8_t num_frames = s_sbc_storage_count / sbc_frame_size;
     s_sbc_storage[0] = num_frames;   /* SBC media payload header */
-    a2dp_source_stream_send_media_payload_rtp(
+    uint8_t rc = a2dp_source_stream_send_media_payload_rtp(
         s_a2dp_cid, s_local_seid, 0, s_rtp_ts,
         s_sbc_storage, s_sbc_storage_count + 1);
     unsigned samples_per_frame = s_sbc_encoder->num_audio_frames(&s_sbc_state);
@@ -193,6 +201,20 @@ static void send_media_packet(void)
     s_sbc_storage_count  = 0;
     s_sbc_ready_to_send  = 0;
     s_packets_sent++;
+
+    if(rc != 0) {
+        bt_link_logf("send rc=%u nf=%u", rc, num_frames);
+    }
+    /* Send-stretch detector: if the gap from the previous successful send
+     * is well above the canonical 10 ms cadence we are stalled at the
+     * controller/RF layer. Threshold 50 ms = ~5 missed sends, well outside
+     * normal jitter and safely below the audio buffer's underrun horizon. */
+    uint32_t now = btstack_run_loop_get_time_ms();
+    if(s_last_send_ms != 0) {
+        uint32_t dt = now - s_last_send_ms;
+        if(dt > 50) bt_link_logf("send gap %u ms", dt);
+    }
+    s_last_send_ms = now;
 }
 
 static void audio_tick(btstack_timer_source_t* t)
@@ -263,6 +285,7 @@ void bt_pcm_sink_start_streaming(uint16_t a2dp_cid, uint8_t local_seid)
     s_samples_ready      = 0;
     s_rtp_ts             = 0;
     s_packets_sent       = 0;
+    s_last_send_ms       = 0;
     s_streaming          = true;
     s_active             = true;
 
