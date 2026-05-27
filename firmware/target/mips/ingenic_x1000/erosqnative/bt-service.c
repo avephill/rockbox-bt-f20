@@ -67,6 +67,7 @@
 
 #include "bt-service.h"
 #include "bt-link-log.h"
+#include "bt-aac-encoder.h"
 #include "crash_log.h"
 
 extern const btstack_uart_t * btstack_uart_block_embedded_instance(void);
@@ -136,7 +137,15 @@ static bool                   s_pending_switch;
 /* ---- BT-thread-local state ---- */
 
 static uint16_t s_a2dp_cid;
+/* SBC endpoint seid. Always populated. Used for outgoing media sends
+ * when the negotiated codec is SBC. */
 static uint8_t  s_local_seid;
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+/* AAC endpoint seid. Populated only when a real AAC encoder is built in;
+ * the AVDTP layer copies the right seid into MEDIA_CODEC events and the
+ * media-send path on bt-pcm-sink uses whichever was negotiated. */
+static uint8_t  s_local_seid_aac;
+#endif
 static uint16_t s_avrcp_cid;
 static bool     s_picked_valid;
 static struct bt_dev_info s_picked;
@@ -150,6 +159,33 @@ static uint8_t sbc_caps[] = {
     0xFF, 2, 35,
 };
 static uint8_t sbc_config[4];
+
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+/* AAC capabilities (6 bytes per AVDTP spec). Encodes:
+ *   byte 0: object type bitmap | DRC flag
+ *           bit 6 = MPEG-4 AAC LC (only object type we advertise)
+ *   byte 1: sample-rate bitmap high 8 bits
+ *   byte 2: sample-rate bitmap low 4 bits (upper nibble) | channels (lower)
+ *           channels: bit 2 = stereo (0x04)
+ *           sample rate: 44.1 kHz = bitmap bit 4; 48 kHz = bit 3
+ *   byte 3: VBR (bit 7) | max bit_rate high 7 bits
+ *   byte 4: max bit_rate middle byte
+ *   byte 5: max bit_rate low byte
+ *
+ * Source advertises MPEG-4 AAC LC, 44.1+48 kHz, stereo, VBR up to ~320 kbps.
+ * Apple H1 sinks (AirPods, BFP) prefer AAC when offered — the sink will
+ * pick the actual sample rate / bit rate when it CONFIGURES our endpoint,
+ * and our a2dp_packet_handler routes that to bt_pcm_sink_set_aac_config. */
+static uint8_t aac_caps[] = {
+    0x40,           /* MPEG-4 AAC LC only, DRC off */
+    0x01,           /* sample-rate bitmap [11:4]: bit 4 = 44.1 kHz */
+    0x80 | 0x04,    /* sample-rate bitmap [3:0] upper nibble: bit 3 = 48 kHz; channels stereo */
+    0x80 | 0x04,    /* VBR=1 | max bit_rate[22:16]: 320000 = 0x4E200 → 0x04 */
+    0xE2,           /* max bit_rate[15:8] */
+    0x00,           /* max bit_rate[7:0] */
+};
+static uint8_t aac_config[6];
+#endif
 
 /* ---- bonded-devices persistence (bt_bonded.dat, magic BTB1) ----
  *
@@ -617,8 +653,21 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
         uint8_t cm =
             a2dp_subevent_signaling_media_codec_sbc_configuration_get_channel_mode(pkt);
         bt_pcm_sink_set_sbc_config(freq, bl, sb, al, cm, mp);
+        bt_link_logf("cfg SBC %u/%u/%u bp=%u", freq, bl, sb, mp);
         break;
     }
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+    case A2DP_SUBEVENT_SIGNALING_MEDIA_CODEC_MPEG_AAC_CONFIGURATION: {
+        uint32_t freq = a2dp_subevent_signaling_media_codec_mpeg_aac_configuration_get_sampling_frequency(pkt);
+        uint8_t  ch   = a2dp_subevent_signaling_media_codec_mpeg_aac_configuration_get_num_channels(pkt);
+        uint32_t br   = a2dp_subevent_signaling_media_codec_mpeg_aac_configuration_get_bit_rate(pkt);
+        uint8_t  vbr  = a2dp_subevent_signaling_media_codec_mpeg_aac_configuration_get_vbr(pkt);
+        bt_pcm_sink_set_aac_config(freq, ch, br, vbr != 0);
+        bt_link_logf("cfg AAC %lu/%uch %lub vbr=%u",
+                     (unsigned long)freq, ch, (unsigned long)br, vbr);
+        break;
+    }
+#endif
     case A2DP_SUBEVENT_STREAM_ESTABLISHED: {
         uint8_t st = a2dp_subevent_stream_established_get_status(pkt);
         if(st == 0) {
@@ -626,20 +675,30 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
                 bonded_promote(&s_picked);
                 s_saved_this_session = true;
             }
-            (void)a2dp_source_start_stream(s_a2dp_cid, s_local_seid);
+            /* Start the actual endpoint that AVDTP selected (SBC seid for
+             * SBC, AAC seid for AAC) — using a hardcoded seid here would
+             * start the wrong endpoint when both are advertised. */
+            uint8_t live_seid =
+                a2dp_subevent_stream_established_get_local_seid(pkt);
+            (void)a2dp_source_start_stream(s_a2dp_cid, live_seid);
         } else {
             set_state(BT_STATE_FAILED);
             set_status("stream fail %u", st);
         }
         break;
     }
-    case A2DP_SUBEVENT_STREAM_STARTED:
-        bt_pcm_sink_start_streaming(s_a2dp_cid, s_local_seid);
+    case A2DP_SUBEVENT_STREAM_STARTED: {
+        /* Use the seid the event reports rather than s_local_seid — if
+         * the peer picked AAC, the active endpoint is s_local_seid_aac
+         * and the SBC seid would be wrong for outgoing media sends. */
+        uint8_t live_seid = a2dp_subevent_stream_started_get_local_seid(pkt);
+        bt_pcm_sink_start_streaming(s_a2dp_cid, live_seid);
         pcm_set_current_sink(PCM_SINK_BT);
         if(s_picked_valid) set_connected_name(&s_picked);
         set_state(BT_STATE_STREAMING);
         set_status("streaming");
         break;
+    }
     case A2DP_SUBEVENT_STREAMING_CAN_SEND_MEDIA_PACKET_NOW:
         bt_pcm_sink_handle_can_send_now();
         break;
@@ -981,6 +1040,20 @@ static void bt_thread_main(void)
 
     a2dp_source_init();
     a2dp_source_register_packet_handler(&a2dp_packet_handler);
+
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+    /* Register AAC FIRST so sinks that walk the SEP list in order (per
+     * AVDTP spec the sink chooses, but some implementations prefer the
+     * lower-numbered seid) see AAC before SBC. BFP picks AAC when offered
+     * regardless of order, but other Apple-family sinks have been observed
+     * to be order-sensitive. */
+    avdtp_stream_endpoint_t* ep_aac = a2dp_source_create_stream_endpoint(
+        AVDTP_AUDIO, AVDTP_CODEC_MPEG_2_4_AAC,
+        aac_caps, sizeof(aac_caps),
+        aac_config, sizeof(aac_config));
+    if(!ep_aac) { set_status("aac ep fail"); goto thread_done; }
+    s_local_seid_aac = avdtp_local_seid(ep_aac);
+#endif
 
     avdtp_stream_endpoint_t* ep = a2dp_source_create_stream_endpoint(
         AVDTP_AUDIO, AVDTP_CODEC_SBC,
