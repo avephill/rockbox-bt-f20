@@ -1019,28 +1019,20 @@ static void bt_thread_main(void)
      * playback. With link policy = 0 the local LM refuses sniff requests
      * from the peer, keeping the link in active mode for the duration. */
     gap_set_default_link_policy_settings(LM_LINK_POLICY_DISABLE_ALL_LM_MODES);
-    /* Restrict ACL packet types to BR slots-1/3 (1-DM1/1-DH1/1-DM3/1-DH3) —
-     * disable EDR (2-DH* / 3-DH*) AND the 5-slot BR variants (1-DM5/1-DH5).
+    /* Restrict ACL packet types to basic-rate (1 Mbps GFSK) only — disable
+     * EDR 2-DH* / 3-DH* on all classic links. EDR needs ~5-9 dB more SNR
+     * than BR to stay below threshold; in a body-blocking null (e.g. F20
+     * in breast pocket, head turned to put the skull between source and
+     * primary bud) that's exactly the margin lost, and EDR drops into a
+     * retransmit cascade that the user hears as a multi-hundred-ms tear
+     * or a sustained dropout. BR rides through the same null with frame
+     * loss instead of cascade collapse.
      *
-     * EDR off: 5-9 dB more SNR than BR, the margin a body-shadow null eats.
-     *
-     * DH5 off: per the BT Link Log capture from the F20→BFP walk, every
-     * audible cutout was a cluster of host-side "send gap" events (no HCI
-     * mode/role/flush events, no QoS violations). The signature is a
-     * controller-side retransmit cascade — the sink (BFP primary bud,
-     * antenna rotating with the user's head turn) misses an ACK, the
-     * BCM4343A1 retries, and our can_send_now flow control backs up
-     * while it does. A DH5 packet spans ~2.9 ms on-air; DH3 spans ~1.25.
-     * Capping to DH3 makes each retransmit cycle ~3x cheaper, so the
-     * stall window shrinks proportionally (the captured 60-180 ms gaps
-     * should compress toward 20-75 ms).
-     *
-     * Bandwidth check: SBC bitpool 35 stereo is ~250 kbps payload. 1-DH3
-     * carries ~390 kbps usable, still ample headroom. The cost is a
-     * marginal increase in per-packet overhead in the no-loss case;
-     * Bose / Redmi / similar sinks won't notice. */
-    hci_enable_acl_packet_types(ACL_PACKET_TYPES_DM1 | ACL_PACKET_TYPES_DH1
-                                 | ACL_PACKET_TYPES_DM3 | ACL_PACKET_TYPES_DH3);
+     * Bandwidth check: SBC bitpool 35, 44.1 kHz, joint stereo is ~250 kbps
+     * payload. 1-DH5 carries ~700 kbps usable, so BR has ample headroom
+     * and we lose no audio quality. Bose / Redmi / similar sinks are
+     * unaffected — they were never bandwidth-limited at our bitpool. */
+    hci_enable_acl_packet_types(ACL_PACKET_TYPES_BR);
     hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
 
     l2cap_init();
