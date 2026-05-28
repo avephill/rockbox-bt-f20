@@ -20,7 +20,9 @@ INCLUDES += -I$(FIRMDIR)/drivers/btstack \
             -I$(FIRMDIR)/drivers/btstack/src/ble \
             -I$(FIRMDIR)/drivers/btstack/platform/embedded \
             -I$(FIRMDIR)/drivers/btstack/3rd-party/bluedroid/encoder/include \
-            -I$(FIRMDIR)/drivers/btstack/3rd-party/bluedroid/decoder/include
+            -I$(FIRMDIR)/drivers/btstack/3rd-party/bluedroid/decoder/include \
+            -I$(FIRMDIR)/drivers/btstack/3rd-party/faac/include \
+            -I$(FIRMDIR)/drivers/btstack/3rd-party/faac/libfaac
 
 ifneq ($(filter reggen,$(TOOLSET)),)
   include $(FIRMDIR)/reggen/reggen.make

@@ -237,7 +237,7 @@ static void post_send(uint8_t rc, unsigned bytes)
         /* Send-stretch detector: see comment on s_last_send_ms. 50 ms = ~5
          * missed canonical sends, well outside normal jitter and safely
          * below the audio underrun horizon. */
-        if(dt > 50) bt_link_logf("send gap %u ms", dt);
+        if(dt > 50) bt_link_logf("send gap %lu ms", (unsigned long)dt);
     }
     s_last_send_ms = now;
 }
