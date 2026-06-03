@@ -42,11 +42,14 @@
  * place the encoder source under firmware/drivers/btstack/3rd-party/faac/. */
 #include "config.h"
 
-#define BT_AAC_BACKEND_STUB 0
-#define BT_AAC_BACKEND_FAAC 1
+#define BT_AAC_BACKEND_STUB  0
+#define BT_AAC_BACKEND_FAAC  1
+#define BT_AAC_BACKEND_VOAAC 2
 
 #ifndef BT_AAC_BACKEND
-# ifdef BT_AAC_USE_FAAC
+# ifdef BT_AAC_USE_VOAAC
+#  define BT_AAC_BACKEND BT_AAC_BACKEND_VOAAC
+# elif defined(BT_AAC_USE_FAAC)
 #  define BT_AAC_BACKEND BT_AAC_BACKEND_FAAC
 # else
 #  define BT_AAC_BACKEND BT_AAC_BACKEND_STUB

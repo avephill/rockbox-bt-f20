@@ -21,8 +21,14 @@ INCLUDES += -I$(FIRMDIR)/drivers/btstack \
             -I$(FIRMDIR)/drivers/btstack/platform/embedded \
             -I$(FIRMDIR)/drivers/btstack/3rd-party/bluedroid/encoder/include \
             -I$(FIRMDIR)/drivers/btstack/3rd-party/bluedroid/decoder/include \
-            -I$(FIRMDIR)/drivers/btstack/3rd-party/faac/include \
-            -I$(FIRMDIR)/drivers/btstack/3rd-party/faac/libfaac
+            -I$(FIRMDIR)/drivers/btstack/3rd-party/voaac/common/include \
+            -I$(FIRMDIR)/drivers/btstack/3rd-party/voaac/aacenc/inc \
+            -I$(FIRMDIR)/drivers/btstack/3rd-party/voaac/aacenc/basic_op
+# NOTE: the FAAC include paths (faac/include, faac/libfaac) are deliberately
+# NOT on the path. FAAC was superseded by vo-aacenc (it needs a libm the
+# firmware link doesn't have) and its libfaac/ holds generically-named headers
+# (config.h, quantize.h, tns.h) that collide with vo-aacenc's and shadow them
+# for cross-directory includes. If FAAC is ever revived, gate these per-backend.
 
 ifneq ($(filter reggen,$(TOOLSET)),)
   include $(FIRMDIR)/reggen/reggen.make

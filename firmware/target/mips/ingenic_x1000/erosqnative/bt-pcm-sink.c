@@ -89,18 +89,34 @@ static struct {
 
 /* ---- packet assembly (SBC: aggregate N frames per packet) ---- */
 #define SBC_STORAGE_SIZE 1030
+/* The A2DP SBC media payload header (s_sbc_storage[0]) carries the frame
+ * count in its LOW NIBBLE only (bits 0-3); bits 4-7 are the F/S/L/RFA
+ * fragmentation flags. A non-fragmented packet thus holds at most 15 frames
+ * — pack more and num_frames spills into the flag bits, corrupting the
+ * header so the sink drops/garbles the whole packet (audible as total
+ * silence). At bitpool 35 frames are ~83 B so a ~672 B payload never reaches
+ * 15 frames and the bug hides; at low bitpool (16, ~44 B/frame) we'd pack
+ * 20+ frames. Cap the assembly loop at this many frames per packet.
+ *
+ * (A packetization experiment — capping at 6 frames, ~17 ms/packet — was
+ * tried 2026-05-28 to test whether smaller packets shrink the audible stall
+ * holes. It did NOT help: the dropout equals the controller's wall-clock
+ * retransmit-stall duration, independent of how the audio is packetized.
+ * Reverted to 15 = the header's hard limit. See the session-2 notes in
+ * project-status.md.) */
+#define SBC_MAX_FRAMES_PER_PACKET 15
 static uint8_t  s_sbc_storage[SBC_STORAGE_SIZE];
 static int      s_sbc_storage_count;
 static int      s_sbc_ready_to_send;
 static int      s_max_payload;
+static bool     s_sbc_logged;   /* one-shot: log real frame size / count once per stream */
 
 /* ---- AAC encoder ----
  *
- * AAC LC always consumes 1024 stereo samples per frame and produces a
- * variable-size raw bitstream (no ADTS/LATM wrapper — A2DP packs raw
- * AAC frames directly into the AVDTP media payload, no per-frame header
- * byte the way SBC has). One frame per RTP packet is the standard,
- * simplest, and BFP-friendly choice.
+ * AAC LC always consumes 1024 stereo samples per frame. The encoder backend
+ * returns one LATM AudioMuxElement per frame (A2DP AAC to Apple sinks must be
+ * LATM, not raw AUs — see bt-aac-encoder-voaac.c). We send one element per RTP
+ * packet; there's no SBC-style per-frame header byte.
  *
  * AAC_PAYLOAD_SIZE budgets a generous 1 KB — actual AAC LC stereo at
  * <=256 kbps tops out around 700 bytes/frame in practice. The eventual
@@ -113,6 +129,14 @@ static unsigned          s_aac_max_output;
 static uint8_t           s_aac_payload[AAC_PAYLOAD_SIZE];
 static int               s_aac_payload_size;    /* bytes pending send (0 = empty) */
 static int               s_aac_ready_to_send;
+/* Diagnostics: confirm AU wire-format (raw AAC CPE starts ~0x21; ADTS starts
+ * 0xFF) and the realtime send rate (need ~43 pkt/s = ~86/2s; far less = the
+ * sink starves to silence). One-shot AU dump + a 2 s throughput window. */
+static bool              s_aac_logged_au;
+static uint32_t          s_aac_win_start;
+static uint32_t          s_aac_win_packets;
+static uint32_t          s_aac_win_bytes;   /* sum of AU sizes this window */
+static int               s_aac_last_size;   /* last AU byte count */
 static struct {
     uint32_t sample_rate;
     uint8_t  channels;
@@ -212,13 +236,26 @@ static int pull_pcm(int16_t* pcm, int num_frames)
 static void fill_sbc(void)
 {
     unsigned num_audio_samples = s_sbc_encoder->num_audio_frames(&s_sbc_state);
-    uint16_t sbc_frame_size    = s_sbc_encoder->sbc_buffer_length(&s_sbc_state);
+    if (num_audio_samples == 0) return;
+    /* sbc_buffer_length() reports u16PacketLength, which SBC_Encoder only
+     * fills AFTER the first encode of a stream — configure() leaves it 0.
+     * So we can't divide by it (or even trust the room check) until at least
+     * one frame has been encoded. Let the first frame through unconditionally,
+     * then refresh the size and use it for the room + 15-frame-cap checks.
+     * (The cap matters because the SBC payload header's frame count is a
+     * 4-bit field — see SBC_MAX_FRAMES_PER_PACKET. The first frame always
+     * fits: worst-case ~115 B vs the 1030 B storage.) */
+    uint16_t sbc_frame_size = s_sbc_encoder->sbc_buffer_length(&s_sbc_state);
     while (s_samples_ready >= num_audio_samples
-           && (s_max_payload - s_sbc_storage_count) >= sbc_frame_size) {
+           && (sbc_frame_size == 0
+               || ((s_max_payload - s_sbc_storage_count) >= sbc_frame_size
+                   && (s_sbc_storage_count / sbc_frame_size)
+                          < SBC_MAX_FRAMES_PER_PACKET))) {
         int16_t pcm[256 * 2];
         pull_pcm(pcm, num_audio_samples);
         s_sbc_encoder->encode_signed_16(&s_sbc_state, pcm,
                                          &s_sbc_storage[1 + s_sbc_storage_count]);
+        sbc_frame_size = s_sbc_encoder->sbc_buffer_length(&s_sbc_state);
         s_sbc_storage_count += sbc_frame_size;
         s_samples_ready     -= num_audio_samples;
     }
@@ -245,7 +282,13 @@ static void post_send(uint8_t rc, unsigned bytes)
 static void send_sbc_packet(void)
 {
     uint16_t sbc_frame_size = s_sbc_encoder->sbc_buffer_length(&s_sbc_state);
+    if (sbc_frame_size == 0) { s_sbc_ready_to_send = 0; return; }  /* nothing encoded yet */
     uint8_t num_frames = s_sbc_storage_count / sbc_frame_size;
+    if (!s_sbc_logged) {
+        s_sbc_logged = true;
+        bt_link_logf("SBC bp=%u fsz=%u nf=%u mp=%d",
+                     s_sbc_cfg.max_bitpool, sbc_frame_size, num_frames, s_max_payload);
+    }
     s_sbc_storage[0] = num_frames;   /* SBC media payload header */
     unsigned bytes = s_sbc_storage_count + 1;
     uint8_t rc = a2dp_source_stream_send_media_payload_rtp(
@@ -268,6 +311,12 @@ static void send_aac_packet(void)
         s_aac_ready_to_send = 0;
         return;
     }
+    if(!s_aac_logged_au) {
+        s_aac_logged_au = true;
+        bt_link_logf("AAC au %02x %02x %02x %02x n=%d",
+                     s_aac_payload[0], s_aac_payload[1],
+                     s_aac_payload[2], s_aac_payload[3], s_aac_payload_size);
+    }
     uint8_t rc = a2dp_source_stream_send_media_payload_rtp(
         s_a2dp_cid, s_local_seid, 0, s_rtp_ts,
         s_aac_payload, (uint16_t)s_aac_payload_size);
@@ -275,6 +324,24 @@ static void send_aac_packet(void)
     int sent_bytes       = s_aac_payload_size;
     s_aac_payload_size   = 0;
     s_aac_ready_to_send  = 0;
+    /* Realtime-rate window: ~86 packets/2s is correct (43 fps); a much lower
+     * count means we're delivering under realtime → sink underruns to silence. */
+    uint32_t twin = btstack_run_loop_get_time_ms();
+    if(s_aac_win_start == 0) s_aac_win_start = twin;
+    s_aac_win_packets++;
+    s_aac_win_bytes += (uint32_t)sent_bytes;
+    s_aac_last_size  = sent_bytes;
+    if(twin - s_aac_win_start >= 2000) {
+        /* avg AU size: ~370 B = real 128k audio reaching the encoder;
+         * ~40 B = the encoder is being fed silence (no PCM from playback). */
+        bt_link_logf("AAC %lu pkt last=%d avg=%lu",
+                     (unsigned long)s_aac_win_packets, s_aac_last_size,
+                     (unsigned long)(s_aac_win_bytes /
+                         (s_aac_win_packets ? s_aac_win_packets : 1)));
+        s_aac_win_start = twin;
+        s_aac_win_packets = 0;
+        s_aac_win_bytes = 0;
+    }
     post_send(rc, (unsigned)sent_bytes);
 }
 
@@ -301,7 +368,11 @@ static void audio_tick(btstack_timer_source_t* t)
         if (s_sbc_ready_to_send) return;
         fill_sbc();
         uint16_t frame_sz = s_sbc_encoder->sbc_buffer_length(&s_sbc_state);
-        if ((uint32_t)(s_sbc_storage_count + frame_sz) > (uint32_t)s_max_payload) {
+        bool payload_full = (uint32_t)(s_sbc_storage_count + frame_sz)
+                                > (uint32_t)s_max_payload;
+        bool frames_full  = frame_sz > 0
+                && (s_sbc_storage_count / frame_sz) >= SBC_MAX_FRAMES_PER_PACKET;
+        if (payload_full || frames_full) {
             s_sbc_ready_to_send = 1;
             a2dp_source_stream_endpoint_request_can_send_now(s_a2dp_cid, s_local_seid);
         }
@@ -400,10 +471,16 @@ void bt_pcm_sink_start_streaming(uint16_t a2dp_cid, uint8_t local_seid)
     int max_payload      = a2dp_max_media_payload_size(a2dp_cid, local_seid);
     s_max_payload        = max_payload < SBC_STORAGE_SIZE
                                ? max_payload : SBC_STORAGE_SIZE;
+    s_sbc_logged         = false;   /* re-arm one-shot SBC diagnostic */
     s_sbc_storage_count  = 0;
     s_sbc_ready_to_send  = 0;
     s_aac_payload_size   = 0;
     s_aac_ready_to_send  = 0;
+    s_aac_logged_au      = false;
+    s_aac_win_start      = 0;
+    s_aac_win_packets    = 0;
+    s_aac_win_bytes      = 0;
+    s_aac_last_size      = 0;
     s_time_sent_ms       = 0;
     s_acc_missed         = 0;
     s_samples_ready      = 0;

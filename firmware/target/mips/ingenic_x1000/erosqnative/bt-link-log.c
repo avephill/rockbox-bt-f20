@@ -15,6 +15,7 @@
 #include <string.h>
 #include "system.h"
 #include "kernel.h"
+#include "file.h"
 #include "bt-link-log.h"
 
 #define LOG_CAP 64    /* must be a power of two */
@@ -86,6 +87,28 @@ bool bt_link_log_get(int i, uint32_t* ts_ms, char* out, size_t out_sz)
     }
     restore_irq(irq);
     return true;
+}
+
+void bt_link_log_dump(const char* path)
+{
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
+    if(fd < 0) return;
+    int cnt = bt_link_log_count();
+    for(int i = 0; i < cnt; i++) {
+        uint32_t ts = 0;
+        char msg[BT_LINK_LOG_MSG_LEN];
+        char line[BT_LINK_LOG_MSG_LEN + 24];
+        if(!bt_link_log_get(i, &ts, msg, sizeof(msg))) continue;
+        int n = snprintf(line, sizeof(line), "%lu.%02u %s\n",
+                         (unsigned long)(ts / 1000),
+                         (unsigned)((ts % 1000) / 10), msg);
+        if(n > 0) write(fd, line, n);
+    }
+    char foot[40];
+    int fn = snprintf(foot, sizeof(foot), "[total=%lu]\n",
+                      (unsigned long)bt_link_log_total());
+    if(fn > 0) write(fd, foot, fn);
+    close(fd);
 }
 
 #endif /* !BOOTLOADER */

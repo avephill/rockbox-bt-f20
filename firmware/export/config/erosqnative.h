@@ -27,16 +27,22 @@
 #define HAVE_BT_PCM_SINK
 #endif
 
-/* Enable AAC as an advertised codec on the A2DP source endpoint. Requires
- * the FAAC encoder source to be vendored under
- * firmware/drivers/btstack/3rd-party/faac/ — run
- *   firmware/target/mips/ingenic_x1000/erosqnative/vendor-faac.sh
- * to populate it. Without this, only SBC is offered (the default we shipped
- * before AAC work began).
+/* Enable AAC as an advertised codec on the A2DP source endpoint.
  *
- * Why this is gated: an AAC endpoint advertised with our stub encoder
- * backend would make BFP / AirPods pick AAC over SBC and then receive
- * silence. Better to keep SBC-only until the real encoder is in place. */
+ * BT_AAC_USE_VOAAC selects the vo-aacenc backend (VisualOn, fixed-point,
+ * Apache-2.0) — the chosen encoder for this target: no libm and no malloc
+ * (caller-supplied memory operator), so it links and runs fast on the
+ * FPU-less soft-float X1000. Vendor the source first:
+ *   firmware/target/mips/ingenic_x1000/erosqnative/vendor-voaac.sh
+ *
+ * (BT_AAC_USE_FAAC selects the older FAAC backend — float, needs a libm that
+ * doesn't exist in the firmware link; left here but not used.)
+ *
+ * Gating rationale: advertising an AAC endpoint with only the stub backend
+ * makes BFP/AirPods pick AAC and then receive silence, so AAC stays off until
+ * a real encoder is vendored. With a real backend selected, the AAC endpoint
+ * is registered alongside SBC and AAC-preferring sinks negotiate it. */
+#define BT_AAC_USE_VOAAC
 /* #define BT_AAC_USE_FAAC */
 
 /* CPU defines */

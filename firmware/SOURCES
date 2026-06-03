@@ -1822,6 +1822,42 @@ target/mips/ingenic_x1000/erosqnative/bt-service.c
 target/mips/ingenic_x1000/erosqnative/bt-link-log.c
 target/mips/ingenic_x1000/erosqnative/bt-aac-encoder-stub.c
 target/mips/ingenic_x1000/erosqnative/bt-aac-encoder-faac.c
+target/mips/ingenic_x1000/erosqnative/bt-aac-encoder-voaac.c
+#ifdef BT_AAC_USE_VOAAC
+/* vo-aacenc encoder source (Apache-2.0, mstorsjo/vo-aacenc; fixed-point,
+ * no libm/malloc). Vendored by running
+ * firmware/target/mips/ingenic_x1000/erosqnative/vendor-voaac.sh after
+ * setting BT_AAC_USE_VOAAC in erosqnative.h. C reference path only — the
+ * ARMV5E/ARMV7 asm under aacenc/src/asm is deliberately not built. */
+drivers/btstack/3rd-party/voaac/aacenc/src/aac_rom.c
+drivers/btstack/3rd-party/voaac/aacenc/src/aacenc.c
+drivers/btstack/3rd-party/voaac/aacenc/src/aacenc_core.c
+drivers/btstack/3rd-party/voaac/aacenc/src/adj_thr.c
+drivers/btstack/3rd-party/voaac/aacenc/src/band_nrg.c
+drivers/btstack/3rd-party/voaac/aacenc/src/bit_cnt.c
+drivers/btstack/3rd-party/voaac/aacenc/src/bitbuffer.c
+drivers/btstack/3rd-party/voaac/aacenc/src/bitenc.c
+drivers/btstack/3rd-party/voaac/aacenc/src/block_switch.c
+drivers/btstack/3rd-party/voaac/aacenc/src/channel_map.c
+drivers/btstack/3rd-party/voaac/aacenc/src/dyn_bits.c
+drivers/btstack/3rd-party/voaac/aacenc/src/grp_data.c
+drivers/btstack/3rd-party/voaac/aacenc/src/interface.c
+drivers/btstack/3rd-party/voaac/aacenc/src/line_pe.c
+drivers/btstack/3rd-party/voaac/aacenc/src/memalign.c
+drivers/btstack/3rd-party/voaac/aacenc/src/ms_stereo.c
+drivers/btstack/3rd-party/voaac/aacenc/src/pre_echo_control.c
+drivers/btstack/3rd-party/voaac/aacenc/src/psy_configuration.c
+drivers/btstack/3rd-party/voaac/aacenc/src/psy_main.c
+drivers/btstack/3rd-party/voaac/aacenc/src/qc_main.c
+drivers/btstack/3rd-party/voaac/aacenc/src/quantize.c
+drivers/btstack/3rd-party/voaac/aacenc/src/sf_estim.c
+drivers/btstack/3rd-party/voaac/aacenc/src/spreading.c
+drivers/btstack/3rd-party/voaac/aacenc/src/stat_bits.c
+drivers/btstack/3rd-party/voaac/aacenc/src/tns.c
+drivers/btstack/3rd-party/voaac/aacenc/src/transform.c
+drivers/btstack/3rd-party/voaac/aacenc/basic_op/basicop2.c
+drivers/btstack/3rd-party/voaac/aacenc/basic_op/oper_32b.c
+#endif
 #ifdef BT_AAC_USE_FAAC
 /* FAAC encoder source (LGPL 2.1+, knik0/faac). Vendored by running
  * firmware/target/mips/ingenic_x1000/erosqnative/vendor-faac.sh after

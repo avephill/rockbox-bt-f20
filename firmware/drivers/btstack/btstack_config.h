@@ -10,6 +10,15 @@
 /* Classic BT support (required for inquiry / A2DP) */
 #define ENABLE_CLASSIC
 
+/* Drive A2DP codec selection from the app instead of btstack's built-in
+ * auto-config. The default auto-config (a2dp.c, #ifndef this flag) hardcodes
+ * SBC and ignores every other codec, so an advertised AAC endpoint would never
+ * be negotiated. With explicit config on, bt-service.c's a2dp_packet_handler
+ * collects per-codec capabilities and chooses AAC (preferred) or SBC (fallback)
+ * at A2DP_SUBEVENT_SIGNALING_CAPABILITIES_COMPLETE. NOTE: this disables the
+ * auto-SBC path GLOBALLY, so the app MUST also select SBC for SBC-only sinks. */
+#define ENABLE_A2DP_EXPLICIT_CONFIG
+
 /* H4 transport over UART is our only link */
 #define HAVE_HCI_TRANSPORT_H4
 

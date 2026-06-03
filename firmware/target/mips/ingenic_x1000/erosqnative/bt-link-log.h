@@ -40,3 +40,8 @@ uint32_t bt_link_log_total(void);
 /* Snapshot entry i where i=0 is the oldest currently in the ring and
  * i=count-1 is the newest. Returns false if i is out of range. */
 bool bt_link_log_get(int i, uint32_t* ts_ms, char* out, size_t out_sz);
+
+/* Write the whole ring to `path` (truncating) as "SS.cc msg" lines, oldest
+ * first, with a "[total=N]" footer. BT-thread only (blocking file I/O). Lets us
+ * read the log off the SD card instead of photographing the screen. */
+void bt_link_log_dump(const char* path);

@@ -150,10 +150,38 @@ static uint16_t s_avrcp_cid;
 static bool     s_picked_valid;
 static struct bt_dev_info s_picked;
 
+/* Explicit-config codec selection (ENABLE_A2DP_EXPLICIT_CONFIG).
+ * btstack forwards each remote SEP's capabilities as separate events, then
+ * one CAPABILITIES_COMPLETE. We stash the SBC (and, if built, AAC) choice as
+ * they arrive and commit one at COMPLETE — preferring AAC, falling back to SBC
+ * so SBC-only sinks (Bose/Xiaomi) keep working. Reset per connection. */
+static bool                     s_cap_sbc_seen;
+static uint8_t                  s_cap_sbc_remote_seid;
+static avdtp_configuration_sbc_t s_cap_sbc_cfg;
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+static bool                     s_cap_aac_seen;
+static uint8_t                  s_cap_aac_remote_seid;
+static avdtp_configuration_mpeg_aac_t s_cap_aac_cfg;
+/* AAC-LC target bitrate (CBR) we ask the sink to configure; this becomes the
+ * vo-aacenc encode rate via bt_pcm_sink_set_aac_config. 128 kbps AAC-LC is
+ * transparent for music and roughly half the airtime of our SBC bitpool-35
+ * (~250 kbps) — more retransmit headroom, which is the lever for the BFP
+ * walking stutter (the deeper AAC jitter buffer is the other half). Tunable. */
+#define AAC_TARGET_BITRATE  128000
+#endif
+
 /* SBC capabilities: 44.1 kHz stereo, all block/subband modes.
  * max_bitpool capped at 35 (not the typical 53) — Apple H1-class sinks
  * (AirPods/Beats) glitch on SBC at high bitpool; lower cap = smaller
- * on-air frames = more retransmit headroom. ~240 kbps is still transparent. */
+ * on-air frames = more retransmit headroom. ~240 kbps is still transparent.
+ *
+ * Note (2026-05-28): a bitpool sweep down to 16 was tested and did NOT
+ * reduce BFP's walking stutter — it made it slightly worse, because smaller
+ * frames pack more audio per packet so each retransmit stall punches a bigger
+ * hole. Bitrate is not the lever; the stalls are RF-driven retransmit
+ * cascades (Diag-1). 35 is the quality/headroom sweet spot. The packetization
+ * lever (SBC_MAX_FRAMES_PER_PACKET in bt-pcm-sink.c) is the cheap thing to
+ * tune instead. */
 static uint8_t sbc_caps[] = {
     (AVDTP_SBC_44100 << 4) | AVDTP_SBC_STEREO,
     0xFF, 2, 35,
@@ -616,6 +644,12 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
         s_a2dp_cid = a2dp_subevent_signaling_connection_established_get_a2dp_cid(pkt);
         if(s_state == BT_STATE_READY) set_state(BT_STATE_CONNECTING);
         set_status("signaling ok");
+        /* Fresh negotiation — clear any codec choice from a prior session so
+         * CAPABILITIES_COMPLETE only acts on this round's SEP discovery. */
+        s_cap_sbc_seen = false;
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+        s_cap_aac_seen = false;
+#endif
         bd_addr_t addr;
         a2dp_subevent_signaling_connection_established_get_bd_addr(pkt, addr);
         if(!s_picked_valid) {
@@ -636,6 +670,74 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
             uint16_t cid = 0;
             uint8_t rc = avrcp_connect(addr, &cid);
             set_status("avrcp_connect rc=%u", rc);
+        }
+        break;
+    }
+    /* --- Explicit-config capability collection (ENABLE_A2DP_EXPLICIT_CONFIG).
+     * One event per matching remote SEP during discovery; we record the best
+     * config for each codec and commit the preferred one at COMPLETE. */
+    case A2DP_SUBEVENT_SIGNALING_MEDIA_CODEC_SBC_CAPABILITY: {
+        avdtp_stream_endpoint_t* sep = avdtp_get_stream_endpoint_for_seid(s_local_seid);
+        if(!sep) break;
+        s_cap_sbc_remote_seid =
+            a2dp_subevent_signaling_media_codec_sbc_capability_get_remote_seid(pkt);
+        s_cap_sbc_cfg.sampling_frequency = avdtp_choose_sbc_sampling_frequency(sep,
+            a2dp_subevent_signaling_media_codec_sbc_capability_get_sampling_frequency_bitmap(pkt));
+        s_cap_sbc_cfg.channel_mode = avdtp_choose_sbc_channel_mode(sep,
+            a2dp_subevent_signaling_media_codec_sbc_capability_get_channel_mode_bitmap(pkt));
+        s_cap_sbc_cfg.block_length = avdtp_choose_sbc_block_length(sep,
+            a2dp_subevent_signaling_media_codec_sbc_capability_get_block_length_bitmap(pkt));
+        s_cap_sbc_cfg.subbands = avdtp_choose_sbc_subbands(sep,
+            a2dp_subevent_signaling_media_codec_sbc_capability_get_subbands_bitmap(pkt));
+        s_cap_sbc_cfg.allocation_method = avdtp_choose_sbc_allocation_method(sep,
+            a2dp_subevent_signaling_media_codec_sbc_capability_get_allocation_method_bitmap(pkt));
+        s_cap_sbc_cfg.min_bitpool_value = avdtp_choose_sbc_min_bitpool_value(sep,
+            a2dp_subevent_signaling_media_codec_sbc_capability_get_min_bitpool_value(pkt));
+        s_cap_sbc_cfg.max_bitpool_value = avdtp_choose_sbc_max_bitpool_value(sep,
+            a2dp_subevent_signaling_media_codec_sbc_capability_get_max_bitpool_value(pkt));
+        s_cap_sbc_seen = true;
+        break;
+    }
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+    case A2DP_SUBEVENT_SIGNALING_MEDIA_CODEC_MPEG_AAC_CAPABILITY: {
+        s_cap_aac_remote_seid =
+            a2dp_subevent_signaling_media_codec_mpeg_aac_capability_get_remote_seid(pkt);
+        /* We only advertise (and only vo-aacenc only emits) MPEG-4 AAC LC.
+         * Fix 44.1 kHz stereo to match the source PCM path; cap the bit rate at
+         * our target, but never above what the sink will accept. CBR (vbr=0)
+         * keeps vo-aacenc's rate control predictable. */
+        uint32_t sink_br =
+            a2dp_subevent_signaling_media_codec_mpeg_aac_capability_get_bit_rate(pkt);
+        uint32_t br = AAC_TARGET_BITRATE;
+        if(sink_br != 0 && sink_br < br) br = sink_br;
+        s_cap_aac_cfg.object_type        = AVDTP_AAC_MPEG4_LC;
+        s_cap_aac_cfg.sampling_frequency = 44100;
+        s_cap_aac_cfg.channels           = 2;
+        s_cap_aac_cfg.bit_rate           = br;
+        s_cap_aac_cfg.vbr                = 0;
+        s_cap_aac_cfg.drc                = false;
+        s_cap_aac_seen = true;
+        break;
+    }
+#endif
+    case A2DP_SUBEVENT_SIGNALING_CAPABILITIES_COMPLETE: {
+        uint16_t cid = a2dp_subevent_signaling_capabilities_complete_get_a2dp_cid(pkt);
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+        if(s_cap_aac_seen && s_local_seid_aac) {
+            uint8_t rc = a2dp_source_set_config_mpeg_aac(
+                cid, s_local_seid_aac, s_cap_aac_remote_seid, &s_cap_aac_cfg);
+            bt_link_logf("sel AAC rs=%u br=%lu rc=%u", s_cap_aac_remote_seid,
+                         (unsigned long)s_cap_aac_cfg.bit_rate, rc);
+            if(rc == 0) break;   /* AAC accepted — done */
+            /* else fall through to SBC fallback below */
+        }
+#endif
+        if(s_cap_sbc_seen) {
+            uint8_t rc = a2dp_source_set_config_sbc(
+                cid, s_local_seid, s_cap_sbc_remote_seid, &s_cap_sbc_cfg);
+            bt_link_logf("sel SBC rs=%u rc=%u", s_cap_sbc_remote_seid, rc);
+        } else {
+            bt_link_logf("sel: no codec match");
         }
         break;
     }
@@ -707,6 +809,10 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
         pcm_set_current_sink(PCM_SINK_BUILTIN);
         set_state(BT_STATE_READY);
         set_status("suspended");
+        /* Flush the link log to SD on pause so it can be read off the card
+         * without photographing the screen. Safe here — playback has stopped,
+         * so the blocking write can't hiccup the stream. */
+        bt_link_log_dump(ROCKBOX_DIR "/bt_link.log");
         break;
     case A2DP_SUBEVENT_STREAM_RELEASED:
     case A2DP_SUBEVENT_SIGNALING_CONNECTION_RELEASED:
@@ -715,6 +821,7 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
         clear_connected_name();
         set_state(BT_STATE_READY);
         set_status("disconnected");
+        bt_link_log_dump(ROCKBOX_DIR "/bt_link.log");
         s_picked_valid = false;
         s_a2dp_cid = 0;
         /* Switch-device handoff: a CONNECT_ADDR posted while we were
