@@ -1,0 +1,5 @@
+Vendored from https://github.com/mstorsjo/vo-aacenc.git
+Commit: a277487e051e92e99a532294eed3c673f4d879f2
+Subset: aacenc/{src,inc,basic_op} + common/include (encoder only, no asm).
+Do NOT define ARMV5E / ARMV7Neon / ARM*_INASM — MIPS uses the C path.
+Build deps: <string.h> only (no libm, no malloc; memory via VO_MEM_OPERATOR).
