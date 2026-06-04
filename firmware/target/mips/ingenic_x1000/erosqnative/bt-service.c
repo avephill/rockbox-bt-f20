@@ -636,12 +636,29 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
             set_status("sig fail %u", st);
             break;
         }
+        bd_addr_t addr;
+        a2dp_subevent_signaling_connection_established_get_bd_addr(pkt, addr);
+        uint16_t inc_cid =
+            a2dp_subevent_signaling_connection_established_get_a2dp_cid(pkt);
+        /* Auto-reconnect hijack guard. If we're actively trying to reach a
+         * specific device (s_picked_valid — an explicit connect or a
+         * device-switch in flight) and a DIFFERENT device connected, this is
+         * almost always the device we're switching AWAY from auto-reconnecting
+         * (Apple H1 buds do this instantly). Reject it so it can't clobber
+         * s_a2dp_cid and steal the session — that was the "had to forget the
+         * device to switch" bug. When s_picked is NOT valid (idle), we still
+         * accept unsolicited reconnects (turn buds on → they reconnect). */
+        if(s_picked_valid && memcmp(s_picked.addr, addr, 6) != 0) {
+            a2dp_source_disconnect(inc_cid);
+            set_status("rej %02X%02X", addr[4], addr[5]);
+            break;
+        }
         /* Pick up the cid (works for both outgoing connects and incoming
          * connections from the speaker auto-reconnecting on power-on)
          * and transition to CONNECTING so a subsequent connect_last call
          * does not redundantly try to set up a stream that BTstack will
          * already drive to STREAM_ESTABLISHED on its own. */
-        s_a2dp_cid = a2dp_subevent_signaling_connection_established_get_a2dp_cid(pkt);
+        s_a2dp_cid = inc_cid;
         if(s_state == BT_STATE_READY) set_state(BT_STATE_CONNECTING);
         set_status("signaling ok");
         /* Fresh negotiation — clear any codec choice from a prior session so
@@ -650,8 +667,6 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
 #if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
         s_cap_aac_seen = false;
 #endif
-        bd_addr_t addr;
-        a2dp_subevent_signaling_connection_established_get_bd_addr(pkt, addr);
         if(!s_picked_valid) {
             memset(&s_picked, 0, sizeof(s_picked));
             memcpy(s_picked.addr, addr, 6);
@@ -1006,6 +1021,19 @@ static void process_pending_command(void)
                 break;
             memcpy(s_pending_switch_addr, s_cmd_addr, 6);
             s_pending_switch = true;
+            /* Point s_picked at the target NOW (not just on RELEASED) so the
+             * hijack guard in SIGNALING_CONNECTION_ESTABLISHED rejects the
+             * old device's auto-reconnect for the entire switch window, not
+             * just after the disconnect lands. do_disconnect() tears down the
+             * old link via s_a2dp_cid, which is independent of s_picked. */
+            struct bt_dev_info tgt;
+            memset(&tgt, 0, sizeof(tgt));
+            memcpy(tgt.addr, s_cmd_addr, 6);
+            int ti = find_dev(s_cmd_addr);
+            if(ti >= 0) tgt = s_devs[ti];
+            else { int tb = bonded_find(s_cmd_addr); if(tb >= 0) tgt = s_bonded[tb]; }
+            s_picked = tgt;
+            s_picked_valid = true;
             do_disconnect();
             break;
         }
