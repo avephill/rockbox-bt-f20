@@ -31,6 +31,7 @@
 #include "thread.h"
 #include "file.h"
 #include "rbpaths.h"
+#include "settings.h"   /* global_settings.bt_aac_bitrate / bt_link_logging */
 
 #include "bt-erosqnative.h"
 #include "bt-bcm-patchram.h"
@@ -150,6 +151,21 @@ static uint16_t s_avrcp_cid;
 static bool     s_picked_valid;
 static struct bt_dev_info s_picked;
 
+/* ---- Read-only TX-power probe ----------------------------------------
+ * Diagnostic only. Periodically issues HCI_Read_Transmit_Power_Level on the
+ * active ACL link for both the current and the maximum level, and logs them
+ * as "txpow cur=X max=Y dBm". This is a pure read — no writes, no config or
+ * power-table changes to the BCM4343A1 — so it can't brick anything. It tells
+ * us whether the controller has any TX headroom left (cur < max) before we'd
+ * ever consider an actual power change. Lifecycle is tied to the ACL link:
+ * armed on CONNECTION_COMPLETE, torn down on DISCONNECTION_COMPLETE. */
+#define TXPOW_PERIOD_MS 4000
+static uint16_t                s_acl_handle;
+static bool                    s_acl_valid;
+static btstack_timer_source_t  s_txpow_timer;
+static int                     s_txpow_phase; /* 0 idle, 1 await cur, 2 await max */
+static int                     s_txpow_cur;
+
 /* Explicit-config codec selection (ENABLE_A2DP_EXPLICIT_CONFIG).
  * btstack forwards each remote SEP's capabilities as separate events, then
  * one CAPABILITIES_COMPLETE. We stash the SBC (and, if built, AAC) choice as
@@ -166,8 +182,17 @@ static avdtp_configuration_mpeg_aac_t s_cap_aac_cfg;
  * vo-aacenc encode rate via bt_pcm_sink_set_aac_config. 128 kbps AAC-LC is
  * transparent for music and roughly half the airtime of our SBC bitpool-35
  * (~250 kbps) — more retransmit headroom, which is the lever for the BFP
- * walking stutter (the deeper AAC jitter buffer is the other half). Tunable. */
-#define AAC_TARGET_BITRATE  128000
+ * walking stutter (the deeper AAC jitter buffer is the other half). 96 kbps
+ * trades a little quality for even less airtime on a marginal link. Selected
+ * at connect time by the "Audio quality" setting (global_settings.bt_aac_bitrate:
+ * 0 = HI, 1 = LO, 2 = MIN). MIN (64 kbps) is the worst-case "pocket" mode:
+ * smallest frames -> least airtime -> fastest retransmit recovery on a
+ * body-shadowed link. (Measured 2026-06-08: controller TX power is already
+ * pinned at its 12 dBm ceiling, so frame size is the only robustness lever
+ * left for the pants-pocket scenario.) */
+#define AAC_BITRATE_HI  128000
+#define AAC_BITRATE_LO   96000
+#define AAC_BITRATE_MIN  64000
 #endif
 
 /* SBC capabilities: 44.1 kHz stereo, all block/subband modes.
@@ -492,6 +517,22 @@ static void inquiry_add(uint8_t* pkt)
  * down) on the boot-autoconnect path when HCI reaches WORKING. */
 static void do_connect(const struct bt_dev_info* d);
 
+/* Periodic kick for the read-only TX-power probe. Starts a current-level
+ * read; the COMMAND_COMPLETE handler chains the max-level read and logs both.
+ * Re-arms itself for as long as the ACL link is up. Runs in BT-thread/run-loop
+ * context, so hci_send_cmd is safe here. */
+static void txpow_timer_handler(btstack_timer_source_t* ts)
+{
+    if(s_acl_valid && s_txpow_phase == 0) {
+        s_txpow_phase = 1; /* awaiting current level */
+        hci_send_cmd(&hci_read_transmit_power_level, s_acl_handle, 0);
+    }
+    if(s_acl_valid) {
+        btstack_run_loop_set_timer(ts, TXPOW_PERIOD_MS);
+        btstack_run_loop_add_timer(ts);
+    }
+}
+
 static void hci_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t size)
 {
     (void)ch; (void)size;
@@ -563,12 +604,26 @@ static void hci_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t
         uint16_t hnd = pkt[3] | (pkt[4] << 8);
         bt_link_log_reset();
         bt_link_logf("conn st=%u hnd=%04x", st, hnd);
+        if(st == 0) {
+            /* Arm the read-only TX-power probe on this link. */
+            s_acl_handle = hnd;
+            s_acl_valid  = true;
+            s_txpow_phase = 0;
+            btstack_run_loop_remove_timer(&s_txpow_timer);
+            btstack_run_loop_set_timer_handler(&s_txpow_timer, txpow_timer_handler);
+            btstack_run_loop_set_timer(&s_txpow_timer, TXPOW_PERIOD_MS);
+            btstack_run_loop_add_timer(&s_txpow_timer);
+        }
         break;
     }
     case HCI_EVENT_DISCONNECTION_COMPLETE: {
         uint16_t hnd = pkt[3] | (pkt[4] << 8);
         uint8_t  rsn = pkt[5];
         bt_link_logf("disc hnd=%04x rsn=%02x", hnd, rsn);
+        /* Tear down the TX-power probe with the link. */
+        s_acl_valid = false;
+        s_txpow_phase = 0;
+        btstack_run_loop_remove_timer(&s_txpow_timer);
         /* AVDTP layer will follow up with STREAM_RELEASED; reset state there. */
         if(rsn != 0) set_status("dis rsn=%02x", rsn);
         break;
@@ -614,6 +669,25 @@ static void hci_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t
         uint16_t hnd = pkt[2] | (pkt[3] << 8);
         uint16_t to  = pkt[4] | (pkt[5] << 8);
         bt_link_logf("lsup h=%04x to=%u", hnd, to);
+        break;
+    }
+    case HCI_EVENT_COMMAND_COMPLETE: {
+        if(hci_event_command_complete_get_command_opcode(pkt)
+           != HCI_OPCODE_HCI_READ_TRANSMIT_POWER_LEVEL)
+            break;
+        /* Return params: status[0], handle[1..2], tx_power_level[3] (int8 dBm) */
+        const uint8_t* r = hci_event_command_complete_get_return_parameters(pkt);
+        uint8_t st = r[0];
+        int     pw = (st == 0) ? (int)(int8_t)r[3] : -128;
+        if(s_txpow_phase == 1) {
+            /* current level in hand; chain the max-level read */
+            s_txpow_cur = pw;
+            s_txpow_phase = 2;
+            hci_send_cmd(&hci_read_transmit_power_level, s_acl_handle, 1);
+        } else if(s_txpow_phase == 2) {
+            bt_link_logf("txpow cur=%d max=%d dBm st=%u", s_txpow_cur, pw, st);
+            s_txpow_phase = 0;
+        }
         break;
     }
     default:
@@ -723,7 +797,12 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
          * keeps vo-aacenc's rate control predictable. */
         uint32_t sink_br =
             a2dp_subevent_signaling_media_codec_mpeg_aac_capability_get_bit_rate(pkt);
-        uint32_t br = AAC_TARGET_BITRATE;
+        uint32_t br;
+        switch(global_settings.bt_aac_bitrate) {
+            case 1:  br = AAC_BITRATE_LO;  break;  /* 96 kbps  */
+            case 2:  br = AAC_BITRATE_MIN; break;  /* 64 kbps (pocket) */
+            default: br = AAC_BITRATE_HI;  break;  /* 128 kbps */
+        }
         if(sink_br != 0 && sink_br < br) br = sink_br;
         s_cap_aac_cfg.object_type        = AVDTP_AAC_MPEG4_LC;
         s_cap_aac_cfg.sampling_frequency = 44100;
@@ -1154,20 +1233,37 @@ static void bt_thread_main(void)
      * playback. With link policy = 0 the local LM refuses sniff requests
      * from the peer, keeping the link in active mode for the duration. */
     gap_set_default_link_policy_settings(LM_LINK_POLICY_DISABLE_ALL_LM_MODES);
-    /* Restrict ACL packet types to basic-rate (1 Mbps GFSK) only — disable
-     * EDR 2-DH* / 3-DH* on all classic links. EDR needs ~5-9 dB more SNR
-     * than BR to stay below threshold; in a body-blocking null (e.g. F20
-     * in breast pocket, head turned to put the skull between source and
-     * primary bud) that's exactly the margin lost, and EDR drops into a
-     * retransmit cascade that the user hears as a multi-hundred-ms tear
-     * or a sustained dropout. BR rides through the same null with frame
-     * loss instead of cascade collapse.
+    /* Stay master on the links we initiate. The default allow_role_switch=1
+     * lets the peer take master during connection setup; combined with link
+     * policy 0 above (role switch disabled after connect) we'd then be stuck
+     * as *slave* to the sink, letting its scheduler deprioritize our outgoing
+     * ACL audio underneath its own TWS bud-to-bud relay. Refusing the switch
+     * keeps the F20 controller in charge of piconet scheduling. (Incoming
+     * auto-reconnects still accept as slave per master_slave_policy(0) above;
+     * connect from the menu to exercise the master path.) */
+    gap_set_allow_role_switch(false);
+    /* Restrict ACL packet types to basic-rate (1 Mbps GFSK), 1- and 3-slot
+     * only (1-DM1/1-DH1/1-DM3/1-DH3): disable EDR (2-DHx and 3-DHx) AND the
+     * 5-slot variants (DH5/DM5).
      *
-     * Bandwidth check: SBC bitpool 35, 44.1 kHz, joint stereo is ~250 kbps
-     * payload. 1-DH5 carries ~700 kbps usable, so BR has ample headroom
-     * and we lose no audio quality. Bose / Redmi / similar sinks are
-     * unaffected — they were never bandwidth-limited at our bitpool. */
-    hci_enable_acl_packet_types(ACL_PACKET_TYPES_BR);
+     * EDR off: EDR needs ~5-9 dB more SNR than BR; a body-blocking null (F20
+     * in pocket, head turned so the skull sits between source and the BFP
+     * primary bud) eats exactly that margin and EDR collapses into a
+     * retransmit cascade heard as a multi-hundred-ms tear. BR rides the same
+     * null with frame loss instead of cascade collapse.
+     *
+     * DH5 off (DH3 cap): a stuck packet retransmits until it gets through.
+     * This BTstack has no usable flush-and-continue (its auto-flush feature
+     * disconnects the link). A DH5 retransmit costs ~2.9 ms on-air; DH3
+     * ~1.25 ms, so capping to 3-slot makes each retry ~3x cheaper and shrinks
+     * the stall window proportionally. Costs ~50% more packets per AAC frame
+     * (a ~379 B LATM frame spans 3 DH3 vs 2 DH5) but BR has ample headroom at
+     * 128 kbps. Tried under SBC and reverted with that codec; retested here
+     * under AAC, where the deep sink buffer rides out the shorter stalls.
+     *
+     * Bose / Redmi / similar sinks are unaffected: never near the cliff. */
+    hci_enable_acl_packet_types(ACL_PACKET_TYPES_DM1 | ACL_PACKET_TYPES_DH1
+                                 | ACL_PACKET_TYPES_DM3 | ACL_PACKET_TYPES_DH3);
     hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
 
     l2cap_init();
@@ -1281,6 +1377,9 @@ thread_done:
 int bt_service_enable(void)
 {
     if(s_state != BT_STATE_OFF) return 0;     /* idempotent */
+    /* Apply the persisted "Link logging" setting at power-on (live menu
+     * toggles are handled by the setting's callback). */
+    bt_link_log_set_enabled(global_settings.bt_link_logging);
     bt_btstack_hal_init();
     s_n_devs              = 0;
     s_a2dp_cid            = 0;
@@ -1370,12 +1469,37 @@ int bt_service_forget(const uint8_t addr[6])
 
 enum bt_state bt_service_get_state(void)        { return s_state; }
 bool          bt_service_is_scanning(void)      { return s_scanning; }
+
+bool bt_service_get_active_addr(uint8_t out[6])
+{
+    /* s_picked is the device we're streaming to / actively connecting to.
+     * Single-word reads are atomic on MIPS; the 6-byte copy can momentarily
+     * tear against the BT thread, but the caller only uses it for a
+     * tap-disambiguation compare, so a one-frame stale value is harmless. */
+    if(!s_picked_valid ||
+       (s_state != BT_STATE_STREAMING && s_state != BT_STATE_CONNECTING))
+        return false;
+    memcpy(out, s_picked.addr, 6);
+    return true;
+}
 const char*   bt_service_get_status_msg(void)   { return s_status_msg; }
 const char*   bt_service_get_connected_name(void) { return s_connected_name; }
 bool          bt_service_have_last(void)         { return s_n_bonded > 0; }
 const struct bt_dev_info* bt_service_get_last(void)
 {
     return s_n_bonded > 0 ? &s_bonded[0] : NULL;
+}
+
+void bt_service_scan_clear(void)
+{
+    /* Only the BT thread writes s_devs/s_n_devs, and only while scanning.
+     * If a scan is in flight, leave results alone (the user is mid-search);
+     * otherwise it's safe to clear under IRQ-disable to avoid tearing a
+     * concurrent get_scan_results snapshot. */
+    if(s_scanning) return;
+    int irq = disable_irq_save();
+    s_n_devs = 0;
+    restore_irq(irq);
 }
 
 int bt_service_get_scan_results(struct bt_dev_info* out, int max)

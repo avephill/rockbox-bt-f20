@@ -803,6 +803,8 @@ struct user_settings
 
 #ifdef HAVE_BT_PCM_SINK
     bool bt_autoconnect; /* auto-enable BT and reconnect to last device on boot */
+    int  bt_aac_bitrate; /* A2DP AAC target bitrate: 0 = 128 kbps, 1 = 96 kbps */
+    bool bt_link_logging; /* capture the BT link log to /.rockbox/bt_link.log */
 #endif
 
 #ifdef HAVE_SPEAKER

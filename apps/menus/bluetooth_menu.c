@@ -31,6 +31,8 @@
 #include "screen_access.h"
 #include "yesno.h"
 #include "splash.h"
+#include "lang.h"
+#include "option_select.h"
 
 #include "bt-service.h"
 
@@ -41,16 +43,21 @@
 #define BTM_BC(...)  do { } while (0)
 #endif
 
+/* Define to show the raw bt-service status string (a2dp rc=…, sel SBC rc=…,
+ * rej XXXX, avrcp op=…) on the screen. Off for release — it's developer
+ * jargon; the BT Link Log screen is the real diagnostic surface. */
+/* #define BT_MENU_DEBUG */
+
 static const char* state_str(enum bt_state s)
 {
     switch(s) {
     case BT_STATE_OFF:        return "off";
-    case BT_STATE_ENABLING:   return "enabling...";
-    case BT_STATE_READY:      return "ready";
-    case BT_STATE_SCANNING:   return "scanning...";
+    case BT_STATE_ENABLING:   return "turning on...";
+    case BT_STATE_READY:      return "on";
+    case BT_STATE_SCANNING:   return "searching...";
     case BT_STATE_CONNECTING: return "connecting...";
-    case BT_STATE_STREAMING:  return "STREAMING";
-    case BT_STATE_FAILED:     return "FAILED";
+    case BT_STATE_STREAMING:  return "connected";
+    case BT_STATE_FAILED:     return "connection failed";
     default:                  return "?";
     }
 }
@@ -63,15 +70,16 @@ static const char* state_str(enum bt_state s)
 static int s_pick_sel;
 
 static void format_dev(const struct bt_dev_info* d, int i, int sel,
-                       char* buf, size_t bufsz)
+                       bool is_active, char* buf, size_t bufsz)
 {
     char prefix = (i == sel) ? '>' : ' ';
+    const char* tag = is_active ? " (on)" : "";   /* mark the connected device */
     if(d->name_set)
-        snprintf(buf, bufsz, "%c %s", prefix, d->name);
+        snprintf(buf, bufsz, "%c %s%s", prefix, d->name, tag);
     else
-        snprintf(buf, bufsz, "%c %02X%02X%02X%02X%02X%02X", prefix,
+        snprintf(buf, bufsz, "%c %02X%02X%02X%02X%02X%02X%s", prefix,
                  d->addr[0], d->addr[1], d->addr[2],
-                 d->addr[3], d->addr[4], d->addr[5]);
+                 d->addr[3], d->addr[4], d->addr[5], tag);
 }
 
 /* Snapshot the list the cursor currently navigates. Scan results take
@@ -115,10 +123,14 @@ static void redraw(void)
     bool list_is_scan = false;
     int n_list = active_list(list, BT_SERVICE_MAX_DEVS, &list_is_scan);
 
-    /* Clamp the cursor whenever the underlying list shrinks (e.g. a
-     * forget removed a bonded entry, or a fresh scan started). */
-    if(s_pick_sel >= n_list) s_pick_sel = n_list > 0 ? n_list - 1 : 0;
-    if(s_pick_sel < 0)       s_pick_sel = 0;
+    /* This screen is purely the device list now. Power off, audio quality and
+     * link logging live as their own entries in the parent Bluetooth menu. */
+    int  n_sel = n_list;
+
+    /* Clamp the cursor whenever the selectable count shrinks (e.g. a forget
+     * removed a bonded entry, or a fresh scan started). */
+    if(s_pick_sel >= n_sel) s_pick_sel = n_sel > 0 ? n_sel - 1 : 0;
+    if(s_pick_sel < 0)      s_pick_sel = 0;
 
     FOR_NB_SCREENS(s) {
         struct screen* screen = &screens[s];
@@ -147,8 +159,10 @@ static void redraw(void)
             snprintf(ln, sizeof(ln), "Bluetooth: %s", state_str(st));
         screen->puts_scroll(0, line++, ln);
 
+#ifdef BT_MENU_DEBUG
         const char* msg = bt_service_get_status_msg();
         if(msg && msg[0]) screen->puts_scroll(0, line++, msg);
+#endif
 
         const char* conn = bt_service_get_connected_name();
         if(conn && conn[0]) {
@@ -162,10 +176,15 @@ static void redraw(void)
             snprintf(ln, sizeof(ln), "%s (%d):",
                      list_is_scan ? "Found" : "Paired", n_list);
             screen->puts_scroll(0, line++, ln);
+            /* reserve a line for the hint */
             int max_devs = nb_lines - line - 2;
             if(max_devs > n_list) max_devs = n_list;
+            uint8_t active[6];
+            bool have_active = bt_service_get_active_addr(active);
             for(int i = 0; i < max_devs; i++) {
-                format_dev(&list[i], i, s_pick_sel, ln, sizeof(ln));
+                bool is_active = have_active
+                               && memcmp(active, list[i].addr, 6) == 0;
+                format_dev(&list[i], i, s_pick_sel, is_active, ln, sizeof(ln));
                 screen->puts_scroll(0, line++, ln);
             }
         }
@@ -186,14 +205,14 @@ static void redraw(void)
             case BT_STATE_OFF:        hint = "PLAY=on  BACK=exit"; break;
             case BT_STATE_READY:
                 if(list_is_scan)      hint = "PLAY=connect  MENU=rescan";
-                else if(n_list > 0)   hint = "PLAY=play  hold MENU=forget";
+                else if(n_list > 0)   hint = "PLAY=connect  hold MENU=forget";
                 else                  hint = "MENU=scan";
                 break;
             case BT_STATE_SCANNING:   hint = "MENU=stop scan"; break;
             case BT_STATE_STREAMING:
                 hint = list_is_scan
                          ? "PLAY=switch  MENU=rescan"
-                         : "PLAY=disconnect  MENU=add device";
+                         : "PLAY=switch  hold MENU=forget";
                 break;
             case BT_STATE_CONNECTING: hint = "PLAY=disconnect"; break;
             case BT_STATE_FAILED:     hint = "MENU=retry"; break;
@@ -216,6 +235,10 @@ int bt_open_screen(void)
 
     /* Auto-enable BT on entry. Idempotent if already on. */
     bt_service_enable();
+    /* Open on the paired list: drop any scan results left over from a previous
+     * visit (they otherwise hide the paired devices, making it impossible to
+     * pick/switch a remembered device without rescanning). MENU rescans. */
+    bt_service_scan_clear();
 
     while(true) {
         redraw();
@@ -228,19 +251,27 @@ int bt_open_screen(void)
         struct bt_dev_info list[BT_SERVICE_MAX_DEVS];
         bool list_is_scan = false;
         int n_list = active_list(list, BT_SERVICE_MAX_DEVS, &list_is_scan);
+        int  n_sel = n_list;
 
         if(act == ACTION_STD_OK) {
             if(st == BT_STATE_OFF) {
                 bt_service_enable();
-            } else if(list_is_scan && n_list > 0 && s_pick_sel < n_list) {
-                /* Scan-result picked: connect (or switch). bt-service
-                 * handles the disconnect-then-connect handoff if a
-                 * stream is currently up. */
-                bt_service_connect_addr(list[s_pick_sel].addr);
-            } else if(st == BT_STATE_READY) {
-                if(n_list > 0 && s_pick_sel < n_list)
+            } else if(n_list > 0 && s_pick_sel < n_list) {
+                /* A device is selected (scan result or paired). Tapping a
+                 * device that is NOT the active one connects to it — or, if
+                 * something is already streaming, switches to it in one press
+                 * (bt-service does the disconnect-then-connect handoff).
+                 * Tapping the device that IS currently active disconnects it.
+                 * This makes the paired list behave like the scan list, so the
+                 * user never has to "disconnect, then reconnect" to switch. */
+                uint8_t active[6];
+                bool have_active = bt_service_get_active_addr(active);
+                if(have_active && memcmp(active, list[s_pick_sel].addr, 6) == 0)
+                    bt_service_disconnect();
+                else
                     bt_service_connect_addr(list[s_pick_sel].addr);
             } else if(st == BT_STATE_STREAMING || st == BT_STATE_CONNECTING) {
+                /* No list to tap, but something is up — PLAY disconnects it. */
                 bt_service_disconnect();
             } else if(st == BT_STATE_FAILED) {
                 /* On retry, re-enable to flush state. */
@@ -249,10 +280,9 @@ int bt_open_screen(void)
             }
         } else if(act == ACTION_STD_CONTEXT) {
             /* Long-press OK on a bonded device → forget it (with confirm).
-             * Only meaningful when the bonded list is the active one;
-             * forgetting a scan-result that's not yet bonded is a no-op. */
-            if(!list_is_scan && st == BT_STATE_READY
-               && n_list > 0 && s_pick_sel < n_list) {
+             * Works in any state — bt_service_forget disconnects first if it's
+             * the active device. No-op on a scan result that isn't bonded. */
+            if(!list_is_scan && n_list > 0 && s_pick_sel < n_list) {
                 if(confirm_forget(&list[s_pick_sel])) {
                     bt_service_forget(list[s_pick_sel].addr);
                     splashf(HZ, "Forgot %s",
@@ -273,17 +303,92 @@ int bt_open_screen(void)
         } else if(act == ACTION_STD_PREV || act == ACTION_STD_PREVREPEAT) {
             if(s_pick_sel > 0) s_pick_sel--;
         } else if(act == ACTION_STD_NEXT || act == ACTION_STD_NEXTREPEAT) {
-            if(s_pick_sel < n_list - 1) s_pick_sel++;
+            if(s_pick_sel < n_sel - 1) s_pick_sel++;
         }
     }
     return 0;
 }
 
-MENUITEM_FUNCTION(bt_open_screen_item, 0, "Open Bluetooth",
+/* --- parent "Bluetooth" menu items ----------------------------------------
+ * Audio quality, Link logging and Auto-connect are shown with their current
+ * value inline ("Audio quality: 128 kbps") via DYNTEXT items: a text callback
+ * renders "name: value", and selecting one opens the normal Rockbox option
+ * chooser through option_screen(), so persistence and the link-logging change
+ * callback (settings_list.c) still run. */
+
+static void bt_edit_setting(const void *var)
+{
+    const struct settings_list *s = find_setting(var);
+    if(s)
+        option_screen(s, NULL, s->flags & F_TEMPVAR, str(s->lang_id));
+}
+
+static int bt_aac_bitrate_edit(void)
+{
+    bt_edit_setting(&global_settings.bt_aac_bitrate);
+    return 0;
+}
+static char* bt_aac_bitrate_text(int sel, void *data, char *buf, size_t len)
+{
+    (void)sel; (void)data;
+    const char* q = global_settings.bt_aac_bitrate == 2 ? "64 kbps"
+                  : global_settings.bt_aac_bitrate == 1 ? "96 kbps"
+                  : "128 kbps";
+    snprintf(buf, len, "%s: %s", (char*)str(LANG_BT_AUDIO_QUALITY), q);
+    return buf;
+}
+
+static int bt_link_logging_edit(void)
+{
+    bt_edit_setting(&global_settings.bt_link_logging);
+    return 0;
+}
+static char* bt_link_logging_text(int sel, void *data, char *buf, size_t len)
+{
+    (void)sel; (void)data;
+    snprintf(buf, len, "%s: %s", (char*)str(LANG_BT_LINK_LOGGING),
+             global_settings.bt_link_logging ? "On" : "Off");
+    return buf;
+}
+
+static int bt_autoconnect_edit(void)
+{
+    bt_edit_setting(&global_settings.bt_autoconnect);
+    return 0;
+}
+static char* bt_autoconnect_text(int sel, void *data, char *buf, size_t len)
+{
+    (void)sel; (void)data;
+    snprintf(buf, len, "%s: %s", (char*)str(LANG_BT_AUTOCONNECT_ON_BOOT),
+             global_settings.bt_autoconnect ? "On" : "Off");
+    return buf;
+}
+
+static int bt_turn_off(void)
+{
+    if(bt_service_is_enabled()) {
+        bt_service_disable();
+        splashf(HZ, "Bluetooth off");
+    } else {
+        splashf(HZ, "Bluetooth is off");
+    }
+    return 0;
+}
+
+MENUITEM_FUNCTION(bt_open_screen_item, 0, "Devices",
                   bt_open_screen, NULL, Icon_NOICON);
-MENUITEM_SETTING(bt_autoconnect_item, &global_settings.bt_autoconnect, NULL);
+MENUITEM_FUNCTION_DYNTEXT(bt_aac_bitrate_item, 0, bt_aac_bitrate_edit,
+                          bt_aac_bitrate_text, NULL, NULL, NULL, Icon_NOICON);
+MENUITEM_FUNCTION_DYNTEXT(bt_link_logging_item, 0, bt_link_logging_edit,
+                          bt_link_logging_text, NULL, NULL, NULL, Icon_NOICON);
+MENUITEM_FUNCTION_DYNTEXT(bt_autoconnect_item, 0, bt_autoconnect_edit,
+                          bt_autoconnect_text, NULL, NULL, NULL, Icon_NOICON);
+MENUITEM_FUNCTION(bt_turn_off_item, 0, "Turn Bluetooth off",
+                  bt_turn_off, NULL, Icon_NOICON);
 
 MAKE_MENU(bluetooth_menu, "Bluetooth", NULL, Icon_NOICON,
-          &bt_open_screen_item, &bt_autoconnect_item);
+          &bt_open_screen_item, &bt_aac_bitrate_item,
+          &bt_link_logging_item, &bt_autoconnect_item,
+          &bt_turn_off_item);
 
 #endif /* HAVE_BT_PCM_SINK */

@@ -92,8 +92,17 @@ bool          bt_service_is_scanning(void);
 const char*   bt_service_get_status_msg(void);
 /* Human-readable name of currently-connected device, "" if none. */
 const char*   bt_service_get_connected_name(void);
+/* Copy the address of the device currently being streamed to / connected to
+ * into out[6] and return true; false (out untouched) if idle. Lets the UI
+ * tell "the selected paired device" from "the active one" so a tap can switch
+ * vs. disconnect. */
+bool          bt_service_get_active_addr(uint8_t out[6]);
 /* Snapshot of current scan results into caller's buffer. */
 int           bt_service_get_scan_results(struct bt_dev_info* out, int max);
+/* Discard accumulated scan results (no-op while a scan is in progress).
+ * The UI calls this on entry so it opens on the paired list instead of stale
+ * results from a previous visit, which otherwise hide the paired list. */
+void          bt_service_scan_clear(void);
 /* Snapshot of bonded (paired and remembered) devices, ordered most-recently
  * connected first. Returns the number copied. */
 int           bt_service_get_bonded(struct bt_dev_info* out, int max);

@@ -17060,3 +17060,88 @@
     erosqnative: "Auto-connect Bluetooth on boot"
   </voice>
 </phrase>
+<phrase>
+  id: LANG_BT_AUDIO_QUALITY
+  desc: in settings_menu
+  user: core
+  <source>
+    *: none
+    erosqnative: "Audio quality"
+  </source>
+  <dest>
+    *: none
+    erosqnative: "Audio quality"
+  </dest>
+  <voice>
+    *: none
+    erosqnative: "Audio quality"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_BT_BITRATE_128
+  desc: in settings_menu
+  user: core
+  <source>
+    *: none
+    erosqnative: "128 kbps (best quality)"
+  </source>
+  <dest>
+    *: none
+    erosqnative: "128 kbps (best quality)"
+  </dest>
+  <voice>
+    *: none
+    erosqnative: "128 kbps"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_BT_BITRATE_96
+  desc: in settings_menu
+  user: core
+  <source>
+    *: none
+    erosqnative: "96 kbps (more robust)"
+  </source>
+  <dest>
+    *: none
+    erosqnative: "96 kbps (more robust)"
+  </dest>
+  <voice>
+    *: none
+    erosqnative: "96 kbps"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_BT_BITRATE_64
+  desc: in settings_menu
+  user: core
+  <source>
+    *: none
+    erosqnative: "64 kbps (pocket)"
+  </source>
+  <dest>
+    *: none
+    erosqnative: "64 kbps (pocket)"
+  </dest>
+  <voice>
+    *: none
+    erosqnative: "64 kbps"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_BT_LINK_LOGGING
+  desc: in settings_menu
+  user: core
+  <source>
+    *: none
+    erosqnative: "Link logging"
+  </source>
+  <dest>
+    *: none
+    erosqnative: "Link logging"
+  </dest>
+  <voice>
+    *: none
+    erosqnative: "Link logging"
+  </voice>
+</phrase>

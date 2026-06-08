@@ -75,6 +75,14 @@
 #include "usb-ibasso.h"
 #endif
 
+#ifdef HAVE_BT_PCM_SINK
+/* Defined in the erosqnative BT link-log driver. Forward-declared (rather than
+ * pulling in the target header) so the "Link logging" setting can toggle
+ * capture live from the settings menu. */
+void bt_link_log_set_enabled(bool en);
+static void bt_link_logging_set(int value) { bt_link_log_set_enabled(value != 0); }
+#endif
+
 #define UNUSED {.RESERVED=NULL}
 #define INT(a) {.int_ = a}
 #define UINT(a) {.uint_ = a}
@@ -1315,6 +1323,12 @@ const struct settings_list settings[] = {
 #ifdef HAVE_BT_PCM_SINK
     OFFON_SETTING(0, bt_autoconnect, LANG_BT_AUTOCONNECT_ON_BOOT,
                   false, "bt autoconnect", NULL),
+    CHOICE_SETTING(0, bt_aac_bitrate, LANG_BT_AUDIO_QUALITY, 0,
+                   "bt aac bitrate", "128,96,64", NULL, 3,
+                   ID2P(LANG_BT_BITRATE_128), ID2P(LANG_BT_BITRATE_96),
+                   ID2P(LANG_BT_BITRATE_64)),
+    OFFON_SETTING(0, bt_link_logging, LANG_BT_LINK_LOGGING,
+                  false, "bt link logging", bt_link_logging_set),
 #endif
     /* tuner */
 #if CONFIG_TUNER

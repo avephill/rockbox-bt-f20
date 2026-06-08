@@ -25,6 +25,14 @@
  * only events from the session being investigated. */
 void bt_link_log_reset(void);
 
+/* Logging is opt-in, toggled from the Bluetooth screen. While disabled,
+ * bt_link_logf() and bt_link_log_dump() are no-ops, so the ring isn't
+ * filled and the card isn't written during normal use. RAM-only state:
+ * resets to OFF on every boot. Enabling clears the ring so the captured
+ * window starts fresh. */
+bool bt_link_log_enabled(void);
+void bt_link_log_set_enabled(bool en);
+
 /* Append a printf-formatted entry tagged with the current tick (ms).
  * Safe to call from BT thread; foreground callers must use bt_link_log_reset
  * /_get only. Truncates to BT_LINK_LOG_MSG_LEN-1 chars. */
@@ -41,7 +49,14 @@ uint32_t bt_link_log_total(void);
  * i=count-1 is the newest. Returns false if i is out of range. */
 bool bt_link_log_get(int i, uint32_t* ts_ms, char* out, size_t out_sz);
 
-/* Write the whole ring to `path` (truncating) as "SS.cc msg" lines, oldest
- * first, with a "[total=N]" footer. BT-thread only (blocking file I/O). Lets us
- * read the log off the SD card instead of photographing the screen. */
+/* Flush new entries (since the last dump) to `path` as "SS.cc msg" lines,
+ * oldest first. APPENDS rather than truncates, so multiple pauses — and
+ * sessions across reboots — accumulate in one file instead of clobbering
+ * each other. Each flush is preceded by a "--- pause ---" separator (or
+ * "=== log start ===" for the first flush of a session / after a rotate),
+ * and a "... N dropped ..." line if the ring overflowed between flushes.
+ * The file self-limits: once it passes an internal size cap the next dump
+ * rotates it. No-op while logging is disabled. BT-thread only (blocking
+ * file I/O). Lets us read the log off the SD card instead of photographing
+ * the screen. */
 void bt_link_log_dump(const char* path);
