@@ -813,10 +813,12 @@ do
     case $arch in
         [Ii])
             build "binutils" "mipsel-elf" "2.38" "binutils-c23.patch" "--disable-werror" "gmp isl"
-            # Install a smart 'as' wrapper so GCC's build system doesn't use the
-            # MIPS assembler when compiling host (x86) code.
+            # Install a smart 'as' wrapper. This cross 'as' defaults to the MIPS
+            # assembler (correct for target code, incl. GCC's configure probes);
+            # only genuine host x86 invocations (--32/--64/--x32) escape to the
+            # host assembler. The guard keeps a restart from double-wrapping.
             MIPS_SYSROOT="$prefix/mipsel-elf"
-            if [ -f "$MIPS_SYSROOT/bin/as" ]; then
+            if [ -f "$MIPS_SYSROOT/bin/as" ] && [ ! -f "$MIPS_SYSROOT/bin/as.real" ]; then
                 mv "$MIPS_SYSROOT/bin/as" "$MIPS_SYSROOT/bin/as.real"
                 cat > "$MIPS_SYSROOT/bin/as" << 'ASWRAPPER'
 #!/bin/sh
@@ -837,7 +839,7 @@ for arg in "$@"; do
             ;;
     esac
 done
-exec "$HOST_AS" "$@"
+exec "$MIPS_AS" "$@"
 ASWRAPPER
                 chmod +x "$MIPS_SYSROOT/bin/as"
                 echo "ROCKBOXDEV: installed smart as wrapper at $MIPS_SYSROOT/bin/as"
