@@ -10,10 +10,10 @@
  *   - All BTstack calls (HCI, L2CAP, AVDTP, A2DP, GAP, sink swap) happen
  *     on the BT thread. Foreground/UI threads only post commands and read
  *     status fields.
- *   - Commands are encoded as a single pending command word + bd_addr
- *     argument buffer; the BT thread polls these once per run-loop
- *     iteration. This is enough because the UI never enqueues commands
- *     faster than the BT thread can process them.
+ *   - Commands are posted into a small ring queue (command word + bd_addr
+ *     argument per slot); the BT thread drains it once per run-loop
+ *     iteration. Disable is a separate level-triggered flag because its
+ *     caller blocks on thread exit and must never be dropped.
  *   - Status fields (s_state, s_status_msg, s_connected_name, s_devs)
  *     have a single writer (BT thread) and many readers (UI). Word reads
  *     are atomic on MIPS; the buffers are sized so torn reads are bounded
@@ -81,20 +81,32 @@ static unsigned int   s_thread_id;
 static const char     s_thread_name[] = "bt_service";
 static volatile bool  s_thread_running;
 
-/* Commands posted by foreground → consumed by BT thread. */
+/* Commands posted by foreground → consumed by BT thread. A small ring
+ * queue rather than the original single mailbox slot: two quick UI actions
+ * (e.g. "stop scan" then "connect") could otherwise overwrite each other
+ * before the BT thread woke up, silently losing the first. Writers (UI
+ * threads) are serialized against each other and against the reader by
+ * IRQ-disable (single core); the BT thread is the only reader. A full
+ * queue drops the new command — bounded, and 8 slots is far beyond what
+ * a human can enqueue between two run-loop iterations.
+ *
+ * DISABLE is deliberately NOT a queued command: bt_service_disable blocks
+ * in thread_wait, so a dropped disable would hang the caller forever. It's
+ * a level-triggered flag the BT thread checks every iteration instead. */
 enum bt_cmd {
-    BT_CMD_NONE = 0,
-    BT_CMD_DISABLE,
-    BT_CMD_SCAN_START,
+    BT_CMD_SCAN_START = 1,
     BT_CMD_SCAN_STOP,
     BT_CMD_CONNECT_LAST,
     BT_CMD_CONNECT_ADDR,
     BT_CMD_DISCONNECT,
     BT_CMD_FORGET,
 };
-static volatile int   s_cmd;
-static volatile bool  s_cmd_pending;
-static bd_addr_t      s_cmd_addr;        /* arg for CONNECT_ADDR / FORGET */
+#define BT_CMD_QUEUE_LEN 8
+struct bt_cmd_slot { int cmd; bd_addr_t addr; };
+static struct bt_cmd_slot s_cmd_queue[BT_CMD_QUEUE_LEN];
+static volatile int   s_cmd_head;        /* next write (UI threads) */
+static volatile int   s_cmd_tail;        /* next read (BT thread) */
+static volatile bool  s_disable_req;
 
 /* ---- visible status (single writer = BT thread; readers anywhere) ---- */
 
@@ -545,7 +557,10 @@ static void do_connect(const struct bt_dev_info* d);
  * context, so hci_send_cmd is safe here. */
 static void txpow_timer_handler(btstack_timer_source_t* ts)
 {
-    if(s_acl_valid && s_txpow_phase == 0) {
+    /* Only send when the HCI command buffer is free — a blind hci_send_cmd
+     * would collide with any in-flight stack command (e.g. mid-negotiation)
+     * and get dropped with an error. Skipping a probe round is free. */
+    if(s_acl_valid && s_txpow_phase == 0 && hci_can_send_command_packet_now()) {
         s_txpow_phase = 1; /* awaiting current level */
         hci_send_cmd(&hci_read_transmit_power_level, s_acl_handle, 0);
     }
@@ -712,10 +727,16 @@ static void hci_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t
         uint8_t st = r[0];
         int     pw = (st == 0) ? (int)(int8_t)r[3] : -128;
         if(s_txpow_phase == 1) {
-            /* current level in hand; chain the max-level read */
+            /* current level in hand; chain the max-level read (guarded the
+             * same way as the timer — if the link died or the command
+             * buffer is busy, drop this round rather than colliding) */
             s_txpow_cur = pw;
-            s_txpow_phase = 2;
-            hci_send_cmd(&hci_read_transmit_power_level, s_acl_handle, 1);
+            if(s_acl_valid && hci_can_send_command_packet_now()) {
+                s_txpow_phase = 2;
+                hci_send_cmd(&hci_read_transmit_power_level, s_acl_handle, 1);
+            } else {
+                s_txpow_phase = 0;
+            }
         } else if(s_txpow_phase == 2) {
             bt_link_logf("txpow cur=%d max=%d dBm st=%u", s_txpow_cur, pw, st);
             s_txpow_phase = 0;
@@ -1191,16 +1212,9 @@ static void do_disconnect(void)
     }
 }
 
-static void process_pending_command(void)
+static void process_one_command(int cmd, const bd_addr_t cmd_addr)
 {
-    if(!s_cmd_pending) return;
-    int cmd = s_cmd;
-    s_cmd_pending = false;
-
     switch(cmd) {
-    case BT_CMD_DISABLE:
-        s_thread_running = false;     /* main loop will exit */
-        break;
     case BT_CMD_SCAN_START:
         if(s_scanning) break;       /* already scanning */
         if(s_state == BT_STATE_OFF || s_state == BT_STATE_ENABLING) break;
@@ -1234,9 +1248,9 @@ static void process_pending_command(void)
          * STREAM_RELEASED handler can issue the new connect once the
          * radio is free. Same address: noop. */
         if(s_state == BT_STATE_STREAMING || s_state == BT_STATE_CONNECTING) {
-            if(s_picked_valid && memcmp(s_picked.addr, s_cmd_addr, 6) == 0)
+            if(s_picked_valid && memcmp(s_picked.addr, cmd_addr, 6) == 0)
                 break;
-            memcpy(s_pending_switch_addr, s_cmd_addr, 6);
+            memcpy(s_pending_switch_addr, cmd_addr, 6);
             s_pending_switch = true;
             /* Point s_picked at the target NOW (not just on RELEASED) so the
              * hijack guard in SIGNALING_CONNECTION_ESTABLISHED rejects the
@@ -1245,10 +1259,10 @@ static void process_pending_command(void)
              * old link via s_a2dp_cid, which is independent of s_picked. */
             struct bt_dev_info tgt;
             memset(&tgt, 0, sizeof(tgt));
-            memcpy(tgt.addr, s_cmd_addr, 6);
-            int ti = find_dev(s_cmd_addr);
+            memcpy(tgt.addr, cmd_addr, 6);
+            int ti = find_dev(cmd_addr);
             if(ti >= 0) tgt = s_devs[ti];
-            else { int tb = bonded_find(s_cmd_addr); if(tb >= 0) tgt = s_bonded[tb]; }
+            else { int tb = bonded_find(cmd_addr); if(tb >= 0) tgt = s_bonded[tb]; }
             s_picked = tgt;
             s_picked_valid = true;
             do_disconnect();
@@ -1256,14 +1270,14 @@ static void process_pending_command(void)
         }
         struct bt_dev_info d;
         memset(&d, 0, sizeof(d));
-        memcpy(d.addr, s_cmd_addr, 6);
+        memcpy(d.addr, cmd_addr, 6);
         /* Inherit name from scan results, then fall back to bonded list, so
          * a connect-by-address still picks up a friendly name when the
          * caller (UI) only had the address handy. */
-        int idx = find_dev(s_cmd_addr);
+        int idx = find_dev(cmd_addr);
         if(idx >= 0) d = s_devs[idx];
         else {
-            int b = bonded_find(s_cmd_addr);
+            int b = bonded_find(cmd_addr);
             if(b >= 0) d = s_bonded[b];
         }
         do_connect(&d);
@@ -1277,21 +1291,35 @@ static void process_pending_command(void)
          * so the speaker doesn't think it's still bonded after we drop the
          * link key locally. The packet handlers will reset state on the
          * resulting RELEASED event. */
-        if(s_picked_valid && memcmp(s_picked.addr, s_cmd_addr, 6) == 0
+        if(s_picked_valid && memcmp(s_picked.addr, cmd_addr, 6) == 0
            && (s_state == BT_STATE_STREAMING
                || s_state == BT_STATE_CONNECTING)) {
             do_disconnect();
         }
         bd_addr_t a;
-        memcpy(a, s_cmd_addr, 6);
+        memcpy(a, cmd_addr, 6);
         gap_drop_link_key_for_bd_addr(a);
-        int idx = bonded_find(s_cmd_addr);
+        int idx = bonded_find(cmd_addr);
         if(idx >= 0) bonded_remove_at(idx);
         set_status("forgot device");
         break;
     }
     default:
         break;
+    }
+}
+
+/* Drain every queued command. Called once per run-loop iteration on the
+ * BT thread. Only the tail index is written here; posters own the head. */
+static void process_pending_commands(void)
+{
+    while(s_cmd_tail != s_cmd_head) {
+        int tail = s_cmd_tail;
+        int cmd = s_cmd_queue[tail].cmd;
+        bd_addr_t addr;
+        memcpy(addr, s_cmd_queue[tail].addr, 6);
+        s_cmd_tail = (tail + 1) % BT_CMD_QUEUE_LEN;
+        process_one_command(cmd, addr);
     }
 }
 
@@ -1485,10 +1513,15 @@ static void bt_thread_main(void)
     set_status("hci power on");
     hci_power_control(HCI_POWER_ON);
 
-    /* Service main loop. Exits only when a DISABLE command is posted. */
+    /* Service main loop. Exits only when a disable request is posted. */
     while(s_thread_running) {
         btstack_run_loop_embedded_execute_once();
-        process_pending_command();
+        if(s_disable_req) {
+            s_disable_req = false;
+            s_thread_running = false;
+            break;
+        }
+        process_pending_commands();
     }
 
     /* Shutdown: stop streaming + disconnect, then power off the chip. */
@@ -1530,8 +1563,9 @@ int bt_service_enable(void)
     s_force_sbc           = false;
     s_cfg_aac_inflight    = false;
 #endif
-    s_cmd                 = BT_CMD_NONE;
-    s_cmd_pending         = false;
+    s_cmd_head            = 0;
+    s_cmd_tail            = 0;
+    s_disable_req         = false;
     s_status_msg[0]       = '\0';
     s_connected_name[0]   = '\0';
     s_thread_running      = true;
@@ -1563,8 +1597,9 @@ int bt_service_enable_and_connect_last(void)
 int bt_service_disable(void)
 {
     if(s_state == BT_STATE_OFF) return 0;
-    s_cmd = BT_CMD_DISABLE;
-    s_cmd_pending = true;
+    /* Level-triggered, not queued: this call blocks in thread_wait, so it
+     * must be impossible to drop (a full queue would hang us forever). */
+    s_disable_req = true;
     bt_btstack_hal_signal();
     thread_wait(s_thread_id);
     return 0;
@@ -1575,38 +1610,39 @@ bool bt_service_is_enabled(void)
     return s_state != BT_STATE_OFF;
 }
 
-static int post_cmd(int cmd)
+static int post_cmd_addr(int cmd, const uint8_t* addr)
 {
     if(!bt_service_is_enabled()) return -1;
-    s_cmd = cmd;
-    s_cmd_pending = true;
+    int irq = disable_irq_save();
+    int next = (s_cmd_head + 1) % BT_CMD_QUEUE_LEN;
+    if(next == s_cmd_tail) {
+        /* Queue full — drop. Only reachable if the BT thread has been
+         * wedged for many user actions; the old single-slot mailbox lost
+         * commands far earlier (any two posts between iterations). */
+        restore_irq(irq);
+        return -1;
+    }
+    s_cmd_queue[s_cmd_head].cmd = cmd;
+    if(addr) memcpy(s_cmd_queue[s_cmd_head].addr, addr, 6);
+    s_cmd_head = next;
+    restore_irq(irq);
     bt_btstack_hal_signal();
     return 0;
 }
 
-int bt_service_scan_start(void)    { return post_cmd(BT_CMD_SCAN_START); }
-int bt_service_scan_stop(void)     { return post_cmd(BT_CMD_SCAN_STOP); }
-int bt_service_connect_last(void)  { return post_cmd(BT_CMD_CONNECT_LAST); }
-int bt_service_disconnect(void)    { return post_cmd(BT_CMD_DISCONNECT); }
+int bt_service_scan_start(void)    { return post_cmd_addr(BT_CMD_SCAN_START, NULL); }
+int bt_service_scan_stop(void)     { return post_cmd_addr(BT_CMD_SCAN_STOP, NULL); }
+int bt_service_connect_last(void)  { return post_cmd_addr(BT_CMD_CONNECT_LAST, NULL); }
+int bt_service_disconnect(void)    { return post_cmd_addr(BT_CMD_DISCONNECT, NULL); }
 
 int bt_service_connect_addr(const uint8_t addr[6])
 {
-    if(!bt_service_is_enabled()) return -1;
-    memcpy(s_cmd_addr, addr, 6);
-    s_cmd = BT_CMD_CONNECT_ADDR;
-    s_cmd_pending = true;
-    bt_btstack_hal_signal();
-    return 0;
+    return post_cmd_addr(BT_CMD_CONNECT_ADDR, addr);
 }
 
 int bt_service_forget(const uint8_t addr[6])
 {
-    if(!bt_service_is_enabled()) return -1;
-    memcpy(s_cmd_addr, addr, 6);
-    s_cmd = BT_CMD_FORGET;
-    s_cmd_pending = true;
-    bt_btstack_hal_signal();
-    return 0;
+    return post_cmd_addr(BT_CMD_FORGET, addr);
 }
 
 enum bt_state bt_service_get_state(void)        { return s_state; }

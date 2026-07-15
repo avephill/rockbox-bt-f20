@@ -33,6 +33,7 @@
 #include "splash.h"
 #include "lang.h"
 #include "option_select.h"
+#include "misc.h"
 
 #include "bt-service.h"
 
@@ -184,6 +185,11 @@ static enum bt_menu_action bt_actions_menu(const struct bt_dev_info* sel,
         case ACTION_STD_MENU:               /* MENU again closes the menu */
             return BT_MENU_CANCEL;
         default:
+            /* System events (USB plug, poweroff, charger) must still be
+             * serviced while this blocking menu is up. On USB, the USB
+             * screen has taken over — close the menu underneath it. */
+            if(default_event_handler(act) == SYS_USB_CONNECTED)
+                return BT_MENU_CANCEL;
             break;
         }
     }
@@ -387,6 +393,12 @@ int bt_open_screen(void)
             if(s_pick_sel > 0) s_pick_sel--;
         } else if(act == ACTION_STD_NEXT || act == ACTION_STD_NEXTREPEAT) {
             if(s_pick_sel < n_sel - 1) s_pick_sel++;
+        } else {
+            /* Service system events (USB plug, poweroff, charger) like
+             * every other Rockbox screen. On USB, leave the screen — the
+             * USB mode took over the display. BT keeps running either way. */
+            if(default_event_handler(act) == SYS_USB_CONNECTED)
+                break;
         }
     }
     return 0;
