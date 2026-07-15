@@ -439,20 +439,17 @@ void bt_pcm_sink_set_sbc_config(uint16_t freq, uint8_t block_length,
                               s_sbc_cfg.channel_mode);
 }
 
-void bt_pcm_sink_set_aac_config(uint32_t sample_rate, uint8_t channels,
-                                 uint32_t bit_rate, bool vbr)
+/* (Re)build the AAC encoder from the saved s_aac_cfg. Called on a fresh
+ * configuration and on stream re-start after a SUSPEND (stop_streaming
+ * frees the encoder, but no new MEDIA_CODEC configuration event fires on
+ * the re-START, so the saved config is all we have). */
+static void aac_encoder_setup(void)
 {
-    s_codec              = BT_PCM_CODEC_AAC;
-    s_sample_rate        = sample_rate;
-    s_aac_cfg.sample_rate = sample_rate;
-    s_aac_cfg.channels    = channels;
-    s_aac_cfg.bit_rate    = bit_rate;
-    s_aac_cfg.vbr         = vbr;
-
     /* Tear down any previous encoder before allocating a fresh one — the
      * sink can be re-configured if the peer renegotiates. */
     if(s_aac_enc) { bt_aac_encoder_free(s_aac_enc); s_aac_enc = NULL; }
-    s_aac_enc = bt_aac_encoder_init(sample_rate, channels, bit_rate, vbr);
+    s_aac_enc = bt_aac_encoder_init(s_aac_cfg.sample_rate, s_aac_cfg.channels,
+                                    s_aac_cfg.bit_rate, s_aac_cfg.vbr);
     if(s_aac_enc) {
         s_aac_input_samples = bt_aac_encoder_input_samples(s_aac_enc);
         s_aac_max_output    = bt_aac_encoder_max_output(s_aac_enc);
@@ -462,12 +459,31 @@ void bt_pcm_sink_set_aac_config(uint32_t sample_rate, uint8_t channels,
     }
 }
 
+void bt_pcm_sink_set_aac_config(uint32_t sample_rate, uint8_t channels,
+                                 uint32_t bit_rate, bool vbr)
+{
+    s_codec              = BT_PCM_CODEC_AAC;
+    s_sample_rate        = sample_rate;
+    s_aac_cfg.sample_rate = sample_rate;
+    s_aac_cfg.channels    = channels;
+    s_aac_cfg.bit_rate    = bit_rate;
+    s_aac_cfg.vbr         = vbr;
+    aac_encoder_setup();
+}
+
 enum bt_pcm_codec bt_pcm_sink_get_codec(void) { return s_codec; }
 
 void bt_pcm_sink_start_streaming(uint16_t a2dp_cid, uint8_t local_seid)
 {
     s_a2dp_cid           = a2dp_cid;
     s_local_seid         = local_seid;
+    /* Resume after AVDTP SUSPEND: stop_streaming freed the AAC encoder and
+     * no configuration event re-creates it on the sink's re-START, so an
+     * AAC stream would resume permanently silent (audio_tick bails on
+     * s_aac_enc == NULL every tick). Rebuild it from the saved config.
+     * SBC is immune — its encoder state isn't torn down on stop. */
+    if(s_codec == BT_PCM_CODEC_AAC && !s_aac_enc && s_aac_cfg.sample_rate != 0)
+        aac_encoder_setup();
     int max_payload      = a2dp_max_media_payload_size(a2dp_cid, local_seid);
     s_max_payload        = max_payload < SBC_STORAGE_SIZE
                                ? max_payload : SBC_STORAGE_SIZE;
