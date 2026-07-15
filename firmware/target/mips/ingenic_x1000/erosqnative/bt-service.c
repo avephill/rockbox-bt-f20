@@ -178,6 +178,24 @@ static avdtp_configuration_sbc_t s_cap_sbc_cfg;
 static bool                     s_cap_aac_seen;
 static uint8_t                  s_cap_aac_remote_seid;
 static avdtp_configuration_mpeg_aac_t s_cap_aac_cfg;
+/* AAC-config failure fallback. A sink can advertise an AAC SEP and still
+ * refuse (or simply never answer) our SET_CONFIGURATION — the Redmi speaker
+ * does exactly this: `sel AAC rc=0` in the link log, then silence while the
+ * ACL stays up, because rc only reports that BTstack QUEUED the request.
+ * The remote's answer arrives later as A2DP_SUBEVENT_COMMAND_REJECTED (or
+ * never arrives at all — hence the watchdog timer).
+ *
+ * A same-connection retry with SBC is not possible: after a reject the
+ * a2dp config state is A2DP_CONNECTED, and a2dp_config_process_config_init
+ * only accepts A2DP_DISCOVERY_DONE. So the fallback disconnects and
+ * reconnects through the existing pending-switch machinery with s_force_sbc
+ * set, which makes the retry's CAPABILITIES_COMPLETE skip AAC. The flag is
+ * consumed by exactly one negotiation round; a reject during the SBC retry
+ * cannot recurse because the watchdog only arms for AAC configs. */
+static bool                     s_force_sbc;
+static bool                     s_cfg_aac_inflight;
+static btstack_timer_source_t   s_cfg_watchdog;
+#define AAC_CFG_TIMEOUT_MS 4000
 /* AAC-LC target bitrate (CBR) we ask the sink to configure; this becomes the
  * vo-aacenc encode rate via bt_pcm_sink_set_aac_config. 128 kbps AAC-LC is
  * transparent for music and roughly half the airtime of our SBC bitpool-35
@@ -705,6 +723,37 @@ static void hci_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t
     }
 }
 
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+static void aac_cfg_watchdog_disarm(void)
+{
+    s_cfg_aac_inflight = false;
+    btstack_run_loop_remove_timer(&s_cfg_watchdog);
+}
+
+/* An in-flight AAC SET_CONFIGURATION failed (remote rejected it, or the
+ * watchdog expired without any answer). Tear the connection down and
+ * schedule a reconnect to the same device with s_force_sbc set — see the
+ * comment at s_force_sbc for why the retry can't reuse this connection.
+ * Runs in BT-thread context (packet handler or run-loop timer). */
+static void aac_config_failed(const char* why)
+{
+    if(!s_cfg_aac_inflight) return;
+    aac_cfg_watchdog_disarm();
+    bt_link_logf("AAC cfg %s -> SBC retry", why);
+    if(!s_picked_valid || s_pending_switch) return;
+    s_force_sbc = true;
+    memcpy(s_pending_switch_addr, s_picked.addr, 6);
+    s_pending_switch = true;
+    if(s_a2dp_cid) a2dp_source_disconnect(s_a2dp_cid);
+}
+
+static void aac_cfg_watchdog_handler(btstack_timer_source_t* ts)
+{
+    (void)ts;
+    aac_config_failed("timeout");
+}
+#endif
+
 static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t size)
 {
     (void)ch; (void)size;
@@ -746,10 +795,13 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
         if(s_state == BT_STATE_READY) set_state(BT_STATE_CONNECTING);
         set_status("signaling ok");
         /* Fresh negotiation — clear any codec choice from a prior session so
-         * CAPABILITIES_COMPLETE only acts on this round's SEP discovery. */
+         * CAPABILITIES_COMPLETE only acts on this round's SEP discovery.
+         * (s_force_sbc deliberately survives: the SBC-retry reconnect passes
+         * through here on its way to CAPABILITIES_COMPLETE.) */
         s_cap_sbc_seen = false;
 #if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
         s_cap_aac_seen = false;
+        aac_cfg_watchdog_disarm();
 #endif
         if(!s_picked_valid) {
             memset(&s_picked, 0, sizeof(s_picked));
@@ -799,14 +851,37 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
     }
 #if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
     case A2DP_SUBEVENT_SIGNALING_MEDIA_CODEC_MPEG_AAC_CAPABILITY: {
-        s_cap_aac_remote_seid =
-            a2dp_subevent_signaling_media_codec_mpeg_aac_capability_get_remote_seid(pkt);
-        /* We only advertise (and only vo-aacenc only emits) MPEG-4 AAC LC.
-         * Fix 44.1 kHz stereo to match the source PCM path; cap the bit rate at
-         * our target, but never above what the sink will accept. CBR (vbr=0)
-         * keeps vo-aacenc's rate control predictable. */
+        /* We only encode MPEG-4 AAC LC at 44.1 kHz stereo (vo-aacenc +
+         * the fixed 44.1 PCM path), so the sink's capability bitmaps must
+         * cover exactly that — otherwise our SET_CONFIGURATION is invalid
+         * for the sink and it will reject (or worse, silently ignore) it.
+         * Log the raw caps either way so the next odd sink is diagnosable
+         * from the link log.
+         *
+         * Bitmap encodings (btstack shifts the raw AVDTP bytes, see
+         * avdtp_signaling_emit_media_codec_mpeg_aac_capability):
+         *   object_type: bit 5 = MPEG-4 AAC LC
+         *   sampling_frequency: 12-bit, bit 4 = 44100
+         *   channels: bit 2 = 2 channels */
+        uint8_t ot =
+            a2dp_subevent_signaling_media_codec_mpeg_aac_capability_get_object_type_bitmap(pkt);
+        uint16_t sf =
+            a2dp_subevent_signaling_media_codec_mpeg_aac_capability_get_sampling_frequency_bitmap(pkt);
+        uint8_t chb =
+            a2dp_subevent_signaling_media_codec_mpeg_aac_capability_get_channels_bitmap(pkt);
         uint32_t sink_br =
             a2dp_subevent_signaling_media_codec_mpeg_aac_capability_get_bit_rate(pkt);
+        bt_link_logf("AAC caps ot=%02x sf=%03x ch=%x br=%lu",
+                     ot, sf, chb, (unsigned long)sink_br);
+        if(!(ot & 0x20) || !(sf & 0x10) || !(chb & 0x04)) {
+            bt_link_logf("AAC caps unusable -> SBC");
+            break;      /* s_cap_aac_seen stays false; SBC gets picked */
+        }
+        s_cap_aac_remote_seid =
+            a2dp_subevent_signaling_media_codec_mpeg_aac_capability_get_remote_seid(pkt);
+        /* Cap the bit rate at our target, but never above what the sink
+         * will accept. CBR (vbr=0) keeps vo-aacenc's rate control
+         * predictable. */
         uint32_t br;
         switch(global_settings.bt_aac_bitrate) {
             case 1:  br = AAC_BITRATE_LO;  break;  /* 96 kbps  */
@@ -827,14 +902,27 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
     case A2DP_SUBEVENT_SIGNALING_CAPABILITIES_COMPLETE: {
         uint16_t cid = a2dp_subevent_signaling_capabilities_complete_get_a2dp_cid(pkt);
 #if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
-        if(s_cap_aac_seen && s_local_seid_aac) {
+        if(s_cap_aac_seen && s_local_seid_aac && !s_force_sbc) {
             uint8_t rc = a2dp_source_set_config_mpeg_aac(
                 cid, s_local_seid_aac, s_cap_aac_remote_seid, &s_cap_aac_cfg);
             bt_link_logf("sel AAC rs=%u br=%lu rc=%u", s_cap_aac_remote_seid,
                          (unsigned long)s_cap_aac_cfg.bit_rate, rc);
-            if(rc == 0) break;   /* AAC accepted — done */
+            if(rc == 0) {
+                /* rc==0 only means the request was QUEUED — the sink's
+                 * answer arrives later as a MEDIA_CODEC configuration
+                 * event or COMMAND_REJECTED, or possibly never (Redmi).
+                 * Arm the watchdog so no answer also falls back to SBC. */
+                s_cfg_aac_inflight = true;
+                btstack_run_loop_remove_timer(&s_cfg_watchdog);
+                btstack_run_loop_set_timer_handler(&s_cfg_watchdog,
+                                                   aac_cfg_watchdog_handler);
+                btstack_run_loop_set_timer(&s_cfg_watchdog, AAC_CFG_TIMEOUT_MS);
+                btstack_run_loop_add_timer(&s_cfg_watchdog);
+                break;
+            }
             /* else fall through to SBC fallback below */
         }
+        s_force_sbc = false;   /* one negotiation round only */
 #endif
         if(s_cap_sbc_seen) {
             uint8_t rc = a2dp_source_set_config_sbc(
@@ -864,6 +952,7 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
     }
 #if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
     case A2DP_SUBEVENT_SIGNALING_MEDIA_CODEC_MPEG_AAC_CONFIGURATION: {
+        aac_cfg_watchdog_disarm();   /* the sink answered — config accepted */
         uint32_t freq = a2dp_subevent_signaling_media_codec_mpeg_aac_configuration_get_sampling_frequency(pkt);
         uint8_t  ch   = a2dp_subevent_signaling_media_codec_mpeg_aac_configuration_get_num_channels(pkt);
         uint32_t br   = a2dp_subevent_signaling_media_codec_mpeg_aac_configuration_get_bit_rate(pkt);
@@ -871,6 +960,19 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
         bt_pcm_sink_set_aac_config(freq, ch, br, vbr != 0);
         bt_link_logf("cfg AAC %lu/%uch %lub vbr=%u",
                      (unsigned long)freq, ch, (unsigned long)br, vbr);
+        break;
+    }
+#endif
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+    /* The sink rejected an outstanding request. The one we care about is
+     * SET_CONFIGURATION while our AAC config is in flight — that's a sink
+     * that advertises AAC but won't take our (valid, caps-checked) config.
+     * Retry the whole connection with SBC. */
+    case A2DP_SUBEVENT_COMMAND_REJECTED: {
+        uint8_t sig = a2dp_subevent_command_rejected_get_signal_identifier(pkt);
+        bt_link_logf("a2dp rej sig=%02x", sig);
+        if(sig == AVDTP_SI_SET_CONFIGURATION && s_cfg_aac_inflight)
+            aac_config_failed("rej");
         break;
     }
 #endif
@@ -920,6 +1022,22 @@ static void a2dp_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_
         break;
     case A2DP_SUBEVENT_STREAM_RELEASED:
     case A2DP_SUBEVENT_SIGNALING_CONNECTION_RELEASED:
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+        /* Link dropped while our AAC SET_CONFIGURATION was unanswered —
+         * some sinks close the channel instead of rejecting. Arrange the
+         * same SBC retry as aac_config_failed, minus the disconnect (the
+         * link is already gone); the pending-switch pickup below issues
+         * the reconnect. */
+        if(s_cfg_aac_inflight) {
+            aac_cfg_watchdog_disarm();
+            if(s_picked_valid && !s_pending_switch) {
+                bt_link_logf("AAC cfg dropped -> SBC retry");
+                s_force_sbc = true;
+                memcpy(s_pending_switch_addr, s_picked.addr, 6);
+                s_pending_switch = true;
+            }
+        }
+#endif
         bt_pcm_sink_stop_streaming();
         pcm_set_current_sink(PCM_SINK_BUILTIN);
         clear_connected_name();
@@ -1101,6 +1219,12 @@ static void process_pending_command(void)
         break;
     case BT_CMD_CONNECT_ADDR: {
         if(s_state == BT_STATE_OFF || s_state == BT_STATE_ENABLING) break;
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+        /* An explicit user connect may target a different device than a
+         * pending AAC->SBC retry did; don't let the stale flag force the
+         * new device onto SBC. */
+        s_force_sbc = false;
+#endif
         /* If a stream is up to a different device, the user wants to
          * switch — disconnect first and stash the new addr so the
          * STREAM_RELEASED handler can issue the new connect once the
@@ -1398,6 +1522,10 @@ int bt_service_enable(void)
     s_autoconnect_on_ready = false;
     s_scanning            = false;
     s_pending_switch      = false;
+#if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
+    s_force_sbc           = false;
+    s_cfg_aac_inflight    = false;
+#endif
     s_cmd                 = BT_CMD_NONE;
     s_cmd_pending         = false;
     s_status_msg[0]       = '\0';
