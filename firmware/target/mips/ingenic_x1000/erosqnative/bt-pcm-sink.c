@@ -313,9 +313,24 @@ static void send_aac_packet(void)
     }
     if(!s_aac_logged_au) {
         s_aac_logged_au = true;
-        bt_link_logf("AAC au %02x %02x %02x %02x n=%d",
+        bt_link_logf("AAC au %02x %02x %02x %02x n=%d mp=%d",
                      s_aac_payload[0], s_aac_payload[1],
-                     s_aac_payload[2], s_aac_payload[3], s_aac_payload_size);
+                     s_aac_payload[2], s_aac_payload[3], s_aac_payload_size,
+                     s_max_payload);
+    }
+    /* A frame larger than the sink's media MTU can't be sent — the AVDTP
+     * layer refuses it (ERROR_CODE_MEMORY_CAPACITY_EXCEEDED) and there is
+     * no fragmentation for LATM. vo-aacenc's "CBR" still spikes well above
+     * the average (bit reservoir; ~490 B seen at 128 kbps), so a sink with
+     * a small MTU would lose frames with only a generic send-rc line to
+     * show for it. Drop it here with a distinct log line, and advance the
+     * RTP timestamp so the sink's media clock stays consistent. */
+    if(s_aac_payload_size > s_max_payload) {
+        bt_link_logf("AAC drop %d > mp %d", s_aac_payload_size, s_max_payload);
+        s_rtp_ts            += s_aac_input_samples;
+        s_aac_payload_size   = 0;
+        s_aac_ready_to_send  = 0;
+        return;
     }
     uint8_t rc = a2dp_source_stream_send_media_payload_rtp(
         s_a2dp_cid, s_local_seid, 0, s_rtp_ts,
