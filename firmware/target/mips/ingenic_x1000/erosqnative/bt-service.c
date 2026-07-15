@@ -243,14 +243,18 @@ static uint8_t sbc_config[4];
  *   byte 4: max bit_rate middle byte
  *   byte 5: max bit_rate low byte
  *
- * Source advertises MPEG-4 AAC LC, 44.1+48 kHz, stereo, VBR up to ~320 kbps.
- * Apple H1 sinks (AirPods, BFP) prefer AAC when offered — the sink will
- * pick the actual sample rate / bit rate when it CONFIGURES our endpoint,
- * and our a2dp_packet_handler routes that to bt_pcm_sink_set_aac_config. */
+ * Source advertises MPEG-4 AAC LC, 44.1 kHz ONLY, stereo, VBR up to
+ * ~320 kbps. Apple H1 sinks (AirPods, BFP) prefer AAC when offered.
+ * 44.1 is the only rate the PCM path delivers (bt_samprs — Rockbox DSP
+ * resamples everything to it), so it's the only rate we may advertise:
+ * on an INCOMING connection the sink is the AVDTP initiator and
+ * configures our endpoint with any rate we claim to support — a 48 kHz
+ * pick would be encoded from 44.1 samples and play ~9% pitch-shifted.
+ * Outgoing connects always configure 44.1 explicitly. */
 static uint8_t aac_caps[] = {
     0x40,           /* MPEG-4 AAC LC only, DRC off */
     0x01,           /* sample-rate bitmap [11:4]: bit 4 = 44.1 kHz */
-    0x80 | 0x04,    /* sample-rate bitmap [3:0] upper nibble: bit 3 = 48 kHz; channels stereo */
+    0x04,           /* sample-rate bitmap [3:0] = none; channels: stereo */
     0x80 | 0x04,    /* VBR=1 | max bit_rate[22:16]: 320000 = 0x4E200 → 0x04 */
     0xE2,           /* max bit_rate[15:8] */
     0x00,           /* max bit_rate[7:0] */
