@@ -576,6 +576,16 @@ static void hci_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t
         gap_ssp_confirmation_response(addr);
         break;
 
+    /* Legacy pairing (pre-2.1 sinks, or a speaker that falls back from SSP).
+     * BTstack does NOT auto-answer a PIN request — without a handler the
+     * pairing just stalls and looks to the user like a failure. Mirror
+     * bt-diag.c and reply the near-universal "0000". Harmless for modern SSP
+     * sinks (BFP, most Redmi), which never emit this event. */
+    case HCI_EVENT_PIN_CODE_REQUEST:
+        hci_event_pin_code_request_get_bd_addr(pkt, addr);
+        gap_pin_code_response(addr, "0000");
+        break;
+
     /* --- Diagnostic instrumentation (see bt-link-log.h).
      *
      * We log link-level events that plausibly correlate with audio

@@ -113,6 +113,82 @@ static bool confirm_forget(const struct bt_dev_info* d)
     return gui_syncyesno_run(&prompt, NULL, NULL) == YESNO_YES;
 }
 
+/* Result of the device actions menu (below). */
+enum bt_menu_action { BT_MENU_CANCEL, BT_MENU_SCAN, BT_MENU_FORGET };
+
+/* Explicit actions menu, opened by pressing MENU on the device list.
+ *
+ * This replaces the old "long-press MENU to forget" gesture: tap and hold
+ * on the same button (MENU) were only distinguished by timing, so a slightly
+ * short hold fired a scan instead of a forget. Now MENU always opens this
+ * labelled, navigable menu and Forget is an unambiguous entry.
+ *
+ * `sel` is the highlighted bonded device, or NULL when none is selectable
+ * (e.g. the scan-results view) — in which case Forget is not offered.
+ * Returns the chosen action; BT_MENU_CANCEL if the user backs out. */
+static enum bt_menu_action bt_actions_menu(const struct bt_dev_info* sel,
+                                           bool scanning)
+{
+    const char*          labels[2];
+    enum bt_menu_action  acts[2];
+    int n = 0;
+    labels[n] = scanning ? "Stop scanning" : "Scan for new devices";
+    acts[n++] = BT_MENU_SCAN;
+    if(sel) {
+        labels[n] = "Forget this device";
+        acts[n++] = BT_MENU_FORGET;
+    }
+
+    int cur = 0;
+    while(true) {
+        FOR_NB_SCREENS(s) {
+            struct screen* screen = &screens[s];
+            struct viewport vp;
+            memset(&vp, 0, sizeof(vp));
+            viewport_set_defaults(&vp, s);
+            vp.font = screen->getuifont();
+            struct viewport* last = screen->set_viewport(&vp);
+            screen->clear_viewport();
+
+            char ln[48];
+            int line = 0;
+            int nb_lines = viewport_get_nb_lines(&vp);
+            if(sel && sel->name_set)
+                snprintf(ln, sizeof(ln), "%s", sel->name);
+            else
+                snprintf(ln, sizeof(ln), "Bluetooth");
+            screen->puts_scroll(0, line++, ln);
+            if(line < nb_lines) line++;         /* spacer */
+            for(int i = 0; i < n && line < nb_lines - 1; i++) {
+                snprintf(ln, sizeof(ln), "%c %s", i == cur ? '>' : ' ',
+                         labels[i]);
+                screen->puts_scroll(0, line++, ln);
+            }
+            if(nb_lines - 1 > line)
+                screen->puts_scroll(0, nb_lines - 1, "PLAY=select  BACK=cancel");
+            screen->update_viewport();
+            screen->set_viewport(last);
+        }
+
+        int act = get_action(CONTEXT_STD, TIMEOUT_BLOCK);
+        switch(act) {
+        case ACTION_STD_PREV: case ACTION_STD_PREVREPEAT:
+            if(cur > 0) cur--;
+            break;
+        case ACTION_STD_NEXT: case ACTION_STD_NEXTREPEAT:
+            if(cur < n - 1) cur++;
+            break;
+        case ACTION_STD_OK:
+            return acts[cur];
+        case ACTION_STD_CANCEL:
+        case ACTION_STD_MENU:               /* MENU again closes the menu */
+            return BT_MENU_CANCEL;
+        default:
+            break;
+        }
+    }
+}
+
 /* Render into the theme's content viewport so the status bar / theme
  * frame stays visible (this is what ordinary Rockbox screens do). */
 static void redraw(void)
@@ -189,30 +265,26 @@ static void redraw(void)
             }
         }
 
-        /* Bottom hint line. The bonded-list hint advertises MENU long-press
-         * because that's the action our keymap binds to ACTION_STD_CONTEXT
-         * (BUTTON_MENU|BUTTON_REPEAT) — long-pressing PLAY fires HOTKEY,
-         * which we deliberately don't intercept. The streaming hint also
-         * mentions MENU=add since scan now works during streaming. */
+        /* Bottom hint line. MENU opens the actions menu (scan / forget) — a
+         * single reliable tap, no more long-press. PLAY is the one-tap
+         * connect/switch/disconnect action. */
         int last_line = nb_lines - 1;
         const char* hint = "";
         if(bt_service_is_scanning()) {
             hint = list_is_scan && n_list > 0
-                     ? "PLAY=switch  MENU=stop scan"
-                     : "MENU=stop scan";
+                     ? "PLAY=switch  MENU=options"
+                     : "MENU=options";
         } else {
             switch(st) {
             case BT_STATE_OFF:        hint = "PLAY=on  BACK=exit"; break;
             case BT_STATE_READY:
-                if(list_is_scan)      hint = "PLAY=connect  MENU=rescan";
-                else if(n_list > 0)   hint = "PLAY=connect  hold MENU=forget";
+                if(list_is_scan)      hint = "PLAY=connect  MENU=options";
+                else if(n_list > 0)   hint = "PLAY=connect  MENU=options";
                 else                  hint = "MENU=scan";
                 break;
-            case BT_STATE_SCANNING:   hint = "MENU=stop scan"; break;
+            case BT_STATE_SCANNING:   hint = "MENU=options"; break;
             case BT_STATE_STREAMING:
-                hint = list_is_scan
-                         ? "PLAY=switch  MENU=rescan"
-                         : "PLAY=switch  hold MENU=forget";
+                hint = "PLAY=switch  MENU=options";
                 break;
             case BT_STATE_CONNECTING: hint = "PLAY=disconnect"; break;
             case BT_STATE_FAILED:     hint = "MENU=retry"; break;
@@ -278,27 +350,38 @@ int bt_open_screen(void)
                 bt_service_disable();
                 bt_service_enable();
             }
-        } else if(act == ACTION_STD_CONTEXT) {
-            /* Long-press OK on a bonded device → forget it (with confirm).
-             * Works in any state — bt_service_forget disconnects first if it's
-             * the active device. No-op on a scan result that isn't bonded. */
-            if(!list_is_scan && n_list > 0 && s_pick_sel < n_list) {
-                if(confirm_forget(&list[s_pick_sel])) {
-                    bt_service_forget(list[s_pick_sel].addr);
-                    splashf(HZ, "Forgot %s",
-                            list[s_pick_sel].name_set
-                              ? list[s_pick_sel].name : "device");
-                }
-            }
-        } else if(act == ACTION_STD_MENU) {
-            /* MENU is "scan / add new device" everywhere except OFF.
-             * If a scan is already running it stops it; otherwise
-             * starts one. Works during STREAMING — the radio shares
-             * inquiry windows with audio, so playback may glitch
-             * briefly but the user explicitly asked to look. */
+        } else if(act == ACTION_STD_MENU || act == ACTION_STD_CONTEXT) {
+            /* MENU (tap or hold) opens the actions menu: scan for new
+             * devices, and — when a bonded device is highlighted — forget
+             * it. Forget used to be a MENU long-press, but tap-vs-hold on
+             * the same button made it easy to trigger a scan by mistake, so
+             * it is now an explicit, labelled menu entry. Works during
+             * STREAMING: a scan shares the radio's inquiry windows with
+             * audio, so playback may glitch briefly, but the user asked. */
             if(st != BT_STATE_OFF && st != BT_STATE_ENABLING) {
-                if(bt_service_is_scanning()) bt_service_scan_stop();
-                else                          bt_service_scan_start();
+                bool can_forget = !list_is_scan && n_list > 0
+                                  && s_pick_sel < n_list;
+                /* Snapshot the selection: bt_service_forget / a scan can
+                 * reshape the underlying list, and we use it after the menu. */
+                struct bt_dev_info seldev;
+                if(can_forget) seldev = list[s_pick_sel];
+                switch(bt_actions_menu(can_forget ? &seldev : NULL,
+                                       bt_service_is_scanning())) {
+                case BT_MENU_SCAN:
+                    if(bt_service_is_scanning()) bt_service_scan_stop();
+                    else                          bt_service_scan_start();
+                    break;
+                case BT_MENU_FORGET:
+                    if(can_forget && confirm_forget(&seldev)) {
+                        bt_service_forget(seldev.addr);
+                        splashf(HZ, "Forgot %s",
+                                seldev.name_set ? seldev.name : "device");
+                    }
+                    break;
+                case BT_MENU_CANCEL:
+                default:
+                    break;
+                }
             }
         } else if(act == ACTION_STD_PREV || act == ACTION_STD_PREVREPEAT) {
             if(s_pick_sel > 0) s_pick_sel--;
