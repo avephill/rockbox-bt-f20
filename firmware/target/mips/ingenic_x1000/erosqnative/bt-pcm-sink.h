@@ -50,6 +50,11 @@ void bt_pcm_sink_handle_can_send_now(void);
 /* Diagnostic: total RTP packets sent since last start. */
 uint32_t bt_pcm_sink_packets_sent(void);
 
+/* Milliseconds since the last successful media-packet send, or 0 when not
+ * streaming / nothing sent yet this stream. Feeds bt-service's stall
+ * watchdog. BT-thread only (run-loop timer / packet-handler context). */
+uint32_t bt_pcm_sink_stall_ms(void);
+
 /* True while bt_pcm_sink is the active output. Used by jack-detect plumbing
  * (`headphones_inserted()` in button-erosqnative.c) to keep the playback
  * engine from auto-pausing when nothing is plugged into the analog jack. */

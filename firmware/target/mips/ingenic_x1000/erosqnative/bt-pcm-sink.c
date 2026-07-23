@@ -662,6 +662,12 @@ uint32_t bt_pcm_sink_packets_sent(void)
     return s_packets_sent;
 }
 
+uint32_t bt_pcm_sink_stall_ms(void)
+{
+    if(!s_streaming || s_last_send_ms == 0) return 0;
+    return btstack_run_loop_get_time_ms() - s_last_send_ms;
+}
+
 /* ---- pcm_sink ops ---- */
 
 static void sink_init(void)

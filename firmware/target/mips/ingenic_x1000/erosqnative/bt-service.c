@@ -558,10 +558,42 @@ static void inquiry_add(uint8_t* pkt)
  * down) on the boot-autoconnect path when HCI reaches WORKING. */
 static void do_connect(const struct bt_dev_info* d);
 
-/* Periodic kick for the read-only TX-power probe. Starts a current-level
- * read; the COMMAND_COMPLETE handler chains the max-level read and logs both.
- * Re-arms itself for as long as the ACL link is up. Runs in BT-thread/run-loop
- * context, so hci_send_cmd is safe here. */
+/* ---- Stall watchdog ---------------------------------------------------
+ * A wedged retransmit stall can freeze the media path for a very long time
+ * without dropping the link — the outdoor walk log has a 21 s send gap with
+ * the ACL alive throughout (link supervision only cares about *any* LMP
+ * traffic getting through, not our media). That's the worst UX case:
+ * nothing plays, nothing recovers, the user starts fiddling. If nothing
+ * has been sent for STALL_RECOVER_MS while a stream is supposed to be
+ * running, force a reconnect: pending-switch back to the same device, then
+ * an HCI-level disconnect. gap_disconnect (not a2dp_source_disconnect) on
+ * purpose — the AVDTP close handshake would ride the same wedged ACL,
+ * while the controller terminates an HCI disconnect locally even if the
+ * peer never answers the LMP detach. Rate-limited so a walk through a
+ * long dead zone becomes one reconnect attempt per spacing window, not a
+ * connect storm. */
+#define STALL_RECOVER_MS       5000
+#define STALL_KICK_SPACING_MS 30000
+static uint32_t s_stall_last_kick_ms;
+
+static void link_stall_recover(uint32_t stall_ms)
+{
+    uint32_t now = btstack_run_loop_get_time_ms();
+    if(s_stall_last_kick_ms != 0
+       && now - s_stall_last_kick_ms < STALL_KICK_SPACING_MS) return;
+    if(!s_picked_valid || s_pending_switch) return;
+    s_stall_last_kick_ms = now;
+    bt_link_logf("stall %lu ms -> re-conn", (unsigned long)stall_ms);
+    memcpy(s_pending_switch_addr, s_picked.addr, 6);
+    s_pending_switch = true;
+    gap_disconnect(s_acl_handle);
+}
+
+/* Periodic kick for the read-only link probe. Starts the four-read chain
+ * (see the probe comment above); the COMMAND_COMPLETE handler walks the
+ * remaining phases and logs the round. Doubles as the stall watchdog's
+ * clock. Re-arms itself for as long as the ACL link is up. Runs in
+ * BT-thread/run-loop context, so hci_send_cmd is safe here. */
 static void txpow_timer_handler(btstack_timer_source_t* ts)
 {
     /* Only send when the HCI command buffer is free — a blind hci_send_cmd
@@ -570,6 +602,10 @@ static void txpow_timer_handler(btstack_timer_source_t* ts)
     if(s_acl_valid && s_txpow_phase == 0 && hci_can_send_command_packet_now()) {
         s_txpow_phase = 1; /* awaiting current level */
         hci_send_cmd(&hci_read_transmit_power_level, s_acl_handle, 0);
+    }
+    if(s_acl_valid) {
+        uint32_t stall = bt_pcm_sink_stall_ms();
+        if(stall > STALL_RECOVER_MS) link_stall_recover(stall);
     }
     if(s_acl_valid) {
         btstack_run_loop_set_timer(ts, TXPOW_PERIOD_MS);
@@ -1591,6 +1627,7 @@ int bt_service_enable(void)
     s_autoconnect_on_ready = false;
     s_scanning            = false;
     s_pending_switch      = false;
+    s_stall_last_kick_ms  = 0;
 #if BT_AAC_BACKEND != BT_AAC_BACKEND_STUB
     s_force_sbc           = false;
     s_cfg_aac_inflight    = false;
