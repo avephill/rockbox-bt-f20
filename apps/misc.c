@@ -672,6 +672,11 @@ long default_event_handler_ex(long event, void (*callback)(void *), void *parame
             check_bootfile(true);
 #endif
 #endif
+#ifdef HAVE_SETTIME_FILE
+            /* the host may have dropped a clock-sync file while it owned
+             * the disk; apply it now that the disk is back */
+            settime_check_file();
+#endif
             system_restore();
             return SYS_USB_CONNECTED;
         }
@@ -816,6 +821,62 @@ long default_event_handler(long event)
 {
     return default_event_handler_ex(event, NULL, NULL);
 }
+
+#ifdef HAVE_SETTIME_FILE
+/* Set the RTC from ROCKBOX_DIR/settime.txt ("YYYY-MM-DD HH:MM:SS", local
+ * time), then delete the file. A host computer writes it while the player
+ * is mounted over USB; it's applied on USB extraction — the first moment
+ * the firmware can read the disk again — and once at boot as a fallback
+ * for a file left behind (a boot-applied time is stale by however long
+ * the player sat unbooted, so sync fresh and unplug promptly for an
+ * accurate clock). Lets the clock be set with one shell command instead
+ * of thumbing through the time screen. */
+#define SETTIME_FILE ROCKBOX_DIR "/settime.txt"
+void settime_check_file(void)
+{
+    int fd = open(SETTIME_FILE, O_RDONLY);
+    if (fd < 0)
+        return;
+    char buf[32];
+    ssize_t len = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (len > 0)
+    {
+        buf[len] = '\0';
+        /* parse "Y-M-D H:M:S" — six numbers, one separator char between
+         * each (sscanf isn't linked into the core build) */
+        int f[6];
+        const char *p = buf;
+        int n;
+        for (n = 0; n < 6; n++)
+        {
+            char *end;
+            long v = strtol(p, &end, 10);
+            if (end == p)
+                break;
+            f[n] = (int)v;
+            p = end;
+            if (n < 5 && *p)
+                p++;
+        }
+        if (n == 6)
+        {
+            struct tm tm = { 0 };
+            tm.tm_year = f[0] - 1900;
+            tm.tm_mon  = f[1] - 1;
+            tm.tm_mday = f[2];
+            tm.tm_hour = f[3];
+            tm.tm_min  = f[4];
+            tm.tm_sec  = f[5];
+            set_day_of_week(&tm);
+            if (set_time(&tm) == 0)
+                splashf(HZ, "Clock set: %04d-%02d-%02d %02d:%02d",
+                        f[0], f[1], f[2], f[3], f[4]);
+        }
+    }
+    remove(SETTIME_FILE);
+}
+#endif /* HAVE_SETTIME_FILE */
 
 #ifdef BOOTFILE
 #if !defined(USB_NONE) && !defined(USB_HANDLED_BY_OF) || defined(HAVE_HOTSWAP_STORAGE_AS_MAIN)

@@ -90,6 +90,9 @@
 
 /* RTC settings */
 #define CONFIG_RTC      RTC_X1000
+/* Set the RTC from /.rockbox/settime.txt written by a host computer while
+ * the player is mounted over USB — see settime_check_file() in apps/misc.c */
+#define HAVE_SETTIME_FILE
 
 /* Codec / audio hardware defines */
 #define HW_SAMPR_CAPS SAMPR_CAP_ALL_192

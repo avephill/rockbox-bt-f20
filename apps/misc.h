@@ -150,6 +150,11 @@ int string_option(const char *option, const char *const oplist[], bool ignore_ca
 #if !defined(USB_NONE) && !defined(USB_HANDLED_BY_OF) \
         || defined(HAVE_HOTSWAP_STORAGE_AS_MAIN)
 void check_bootfile(bool do_rolo);
+
+#ifdef HAVE_SETTIME_FILE
+/* apply + delete ROCKBOX_DIR/settime.txt (host-written clock sync) */
+void settime_check_file(void);
+#endif
 #endif
 #endif
 

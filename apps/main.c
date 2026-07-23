@@ -775,6 +775,11 @@ static void init(void)
     CHART(">settings_apply(true)");
     settings_apply(true);
     CHART("<settings_apply(true)");
+#ifdef HAVE_SETTIME_FILE
+    /* boot fallback for a clock-sync file left behind (e.g. the player
+     * was powered off while plugged in) — see settime_check_file() */
+    settime_check_file();
+#endif
 #ifdef HAVE_DIRCACHE
     CHART(">init_dircache(false)");
     init_dircache(false);
