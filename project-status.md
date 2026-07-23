@@ -1,6 +1,6 @@
 # Rockbox erosqnative — Bluetooth A2DP Source
 
-**Last updated**: 2026-07-22 (C13 — outdoor RF robustness: adaptive AAC bitrate, RSSI/LQ link probe, stall watchdog)
+**Last updated**: 2026-07-22 (C13 outdoor RF robustness; non-BT: wheel acceleration + letter overlay, RTC sync via settime.txt)
 **Branch**: `bt-aac`
 **Target**: Surfans F20 DAP (Rockbox `erosqnative`, Ingenic X1000 SoC, MIPS32 bare-metal, HW4 revision)
 **Combo chip**: BCM4343A1 (WiFi + Bluetooth) — only BT brought up.
@@ -382,6 +382,34 @@ These are the non-obvious facts that, if missed, lose hours.
 37. **Link supervision will not rescue a frozen media path.** Supervision only needs *some* LMP traffic to get through; a retransmit-wedged ACL can freeze media near-indefinitely without disconnecting (21 s send gap observed with the link alive throughout). Detect it host-side (no successful media send for N s → reconnect) and tear down with `gap_disconnect`, **not** `a2dp_source_disconnect` — the AVDTP close handshake would ride the same wedged ACL, while an HCI disconnect completes locally even if the peer never answers the LMP detach.
 
 38. **BR/EDR `Read_RSSI` is not absolute dBm by spec** — it's dB relative to the "golden receive range" (0 = inside it, negative = below), though BCM controllers commonly report something close to real dBm. `Read_Link_Quality` is vendor-scaled 0–255, higher = better (BCM derives it from CRC/retransmit rate). Treat both as trend data, not calibrated measurements; `lq` sagging while `tx` stays 12/12 = the link is out of margin with nothing left to give.
+
+39. **`sscanf` is declared in Rockbox's libc headers but NOT linked into the core firmware build** (plugins only). Core code that calls it compiles fine and dies at link time (`undefined reference to sscanf`). Parse with `strtol` by hand — see `settime_check_file()` in `apps/misc.c`. Don't "clean up" that parser back to sscanf.
+
+## Non-BT fork features (wheel + clock)
+
+These ride the same fork but have nothing to do with Bluetooth. All are erosq-gated via config defines so they compile out with one line.
+
+### Scroll-wheel acceleration + fast-scroll letter overlay (commits `902bb14d8c`, `d6d15d1905`, `bd842df267`, `725bfa8aa9`)
+
+iPod-classic-style wheel feel. Stock Rockbox had NO wheel acceleration on this target (the "List Acceleration" settings only affect held buttons, never the wheel).
+
+- **Driver** (`button-erosqnative.c`, behind `HAVE_WHEEL_ACCELERATION` in `erosqnative.h`): a decaying activity counter (charge 16/detent, drain 4/10 ms poll, engage knee at 32, cap 80) computes a list-step multiplier posted in button-data bits 24..30 (bit 31 clear — the e200v2 scheme; `button_apply_acceleration()` returns it as-is). Counter **hard-resets** after a 100 ms detent gap or direction reversal, so a click after any pause moves exactly 1 item. Knife-edge ≈ 25 detents/s: below it everything is 1:1.
+- **Strength setting**: "Wheel Acceleration" (Off/Weak ×4/Moderate ×8/Strong ×16), Settings > General > Display > Scrolling, applied via `button_wheel_set_accel()` (live + at boot from `settings_apply`).
+- **Letter overlay** (`apps/gui/list.c`, behind `HAVE_WHEEL_SCROLL_LETTER`): step multiplier ≥ 4 in a 40+-item list pops a black card with the selected item's first letter (pixel-doubled out of the framebuffer via `FBADDR` — the fragile bit if upstream refactors the fb API again), expiring 0.5 s after the last fast event via a kernel `timeout_register` that posts `BUTTON_REDRAW`. Painted INTO the frame by a hook in `list_draw` (bitmap/list.c) right before its `update_viewport()` — never paint after the push and never push a second rect; both were tried and both flash/tear on camera. Togglable: "Fast-scroll Letter Popup" setting.
+- **Anti-coast**: the framedrop guard in `gui_synclist_do_button` (skip redraw when `button_queue_count() >= FRAMEDROP_TRIGGER`) now applies on wheel targets too. Without it, per-event redraws are slower than a fast spin's event rate, the queue backs up, and the cursor coasts after the wheel stops.
+- Merge-conflict magnets for future rebases: the `ACTION_STD_PREV/NEXT` cases in `gui_synclist_do_button` (modified upstream lines) and the one-call hook in `list_draw`.
+
+### RTC sync from a host-written file (commit `bbf2878cca`)
+
+Sets the clock over USB with zero on-device interaction. Host writes `/.rockbox/settime.txt` containing one line `YYYY-MM-DD HH:MM:SS` (**local** time, years 2000–2099) while the player is mounted, then unplugs:
+
+```sh
+date '+%Y-%m-%d %H:%M:%S' > /run/media/avery/F20/.rockbox/settime.txt && sync
+```
+
+- **Why on-unplug:** while USB-mounted the host owns the raw block device — firmware can't read the FS. `settime_check_file()` (`apps/misc.c`, behind `HAVE_SETTIME_FILE` in `erosqnative.h`) runs from the `SYS_USB_CONNECTED` handler right after `gui_usb_screen_run()` returns (disk just remounted; catches every USB session regardless of screen), plus a boot fallback in native `init()` after `settings_apply(true)` for a file left behind by a player powered off while plugged.
+- Applies via `set_day_of_week()` (mandatory — `valid_time()` rejects an unset weekday) + `set_time()`, splashes `Clock set: ...`, and **always deletes the file** (parse failure included). Parser is strtol-based (gotcha 39).
+- Caveat: the boot-fallback path sets the clock to the *written* timestamp, stale by however long the player sat unbooted — inherent, no reference clock exists. For accuracy: write fresh, unplug promptly. The unplug path is accurate to seconds.
 
 ## File map
 
