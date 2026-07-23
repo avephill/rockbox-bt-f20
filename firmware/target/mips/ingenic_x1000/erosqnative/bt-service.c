@@ -163,20 +163,27 @@ static uint16_t s_avrcp_cid;
 static bool     s_picked_valid;
 static struct bt_dev_info s_picked;
 
-/* ---- Read-only TX-power probe ----------------------------------------
- * Diagnostic only. Periodically issues HCI_Read_Transmit_Power_Level on the
- * active ACL link for both the current and the maximum level, and logs them
- * as "txpow cur=X max=Y dBm". This is a pure read — no writes, no config or
- * power-table changes to the BCM4343A1 — so it can't brick anything. It tells
- * us whether the controller has any TX headroom left (cur < max) before we'd
- * ever consider an actual power change. Lifecycle is tied to the ACL link:
- * armed on CONNECTION_COMPLETE, torn down on DISCONNECTION_COMPLETE. */
+/* ---- Read-only link probe --------------------------------------------
+ * Diagnostic only. Periodically chains four HCI status reads on the active
+ * ACL link — current TX power, max TX power, RSSI, link quality — and logs
+ * one line per round: "link tx=cur/max rssi=R lq=Q". Pure reads, no writes
+ * to the BCM4343A1, can't brick anything. TX headroom (cur < max) has been
+ * ruled out as a lever (always 12/12); RSSI and LQ are the outdoor-walk
+ * margin data: per spec BR/EDR RSSI is dB relative to the golden receive
+ * range (0 = inside it, negative = below), though BCM controllers commonly
+ * report something close to absolute dBm; LQ is vendor-scaled 0-255,
+ * higher = better (BCM derives it from the retransmit/CRC-error rate).
+ * Lifecycle is tied to the ACL link: armed on CONNECTION_COMPLETE, torn
+ * down on DISCONNECTION_COMPLETE. */
 #define TXPOW_PERIOD_MS 4000
 static uint16_t                s_acl_handle;
 static bool                    s_acl_valid;
 static btstack_timer_source_t  s_txpow_timer;
-static int                     s_txpow_phase; /* 0 idle, 1 await cur, 2 await max */
+/* 0 idle, 1 await tx cur, 2 await tx max, 3 await RSSI, 4 await LQ */
+static int                     s_txpow_phase;
 static int                     s_txpow_cur;
+static int                     s_txpow_max;
+static int                     s_link_rssi;
 
 /* Explicit-config codec selection (ENABLE_A2DP_EXPLICIT_CONFIG).
  * btstack forwards each remote SEP's capabilities as separate events, then
@@ -719,27 +726,52 @@ static void hci_packet_handler(uint8_t type, uint16_t ch, uint8_t* pkt, uint16_t
         break;
     }
     case HCI_EVENT_COMMAND_COMPLETE: {
-        if(hci_event_command_complete_get_command_opcode(pkt)
-           != HCI_OPCODE_HCI_READ_TRANSMIT_POWER_LEVEL)
+        uint16_t opc = hci_event_command_complete_get_command_opcode(pkt);
+        if(opc != HCI_OPCODE_HCI_READ_TRANSMIT_POWER_LEVEL
+           && opc != HCI_OPCODE_HCI_READ_RSSI
+           && opc != HCI_OPCODE_HCI_READ_LINK_QUALITY)
             break;
-        /* Return params: status[0], handle[1..2], tx_power_level[3] (int8 dBm) */
+        /* All three commands share the return layout: status[0],
+         * handle[1..2], value[3] (int8 dBm / int8 dB / uint8 quality).
+         * Each phase stashes its value and chains the next read, guarded
+         * the same way as the timer — if the link died or the command
+         * buffer is busy, drop the rest of this round rather than
+         * colliding with a stack-internal command. */
         const uint8_t* r = hci_event_command_complete_get_return_parameters(pkt);
         uint8_t st = r[0];
-        int     pw = (st == 0) ? (int)(int8_t)r[3] : -128;
-        if(s_txpow_phase == 1) {
-            /* current level in hand; chain the max-level read (guarded the
-             * same way as the timer — if the link died or the command
-             * buffer is busy, drop this round rather than colliding) */
-            s_txpow_cur = pw;
-            if(s_acl_valid && hci_can_send_command_packet_now()) {
+        int     v  = (st == 0) ? (int)(int8_t)r[3] : -128;
+        bool chain = s_acl_valid && hci_can_send_command_packet_now();
+        switch(s_txpow_phase) {
+        case 1:
+            s_txpow_cur = v;
+            if(chain) {
                 s_txpow_phase = 2;
                 hci_send_cmd(&hci_read_transmit_power_level, s_acl_handle, 1);
-            } else {
-                s_txpow_phase = 0;
-            }
-        } else if(s_txpow_phase == 2) {
-            bt_link_logf("txpow cur=%d max=%d dBm st=%u", s_txpow_cur, pw, st);
+            } else s_txpow_phase = 0;
+            break;
+        case 2:
+            s_txpow_max = v;
+            if(chain) {
+                s_txpow_phase = 3;
+                hci_send_cmd(&hci_read_rssi, s_acl_handle);
+            } else s_txpow_phase = 0;
+            break;
+        case 3:
+            s_link_rssi = v;
+            if(chain) {
+                s_txpow_phase = 4;
+                hci_send_cmd(&hci_read_link_quality, s_acl_handle);
+            } else s_txpow_phase = 0;
+            break;
+        case 4:
+            /* LQ is unsigned 0-255 — don't run it through the int8 cast. */
+            bt_link_logf("link tx=%d/%d rssi=%d lq=%d st=%u",
+                         s_txpow_cur, s_txpow_max, s_link_rssi,
+                         (st == 0) ? (int)r[3] : -1, st);
             s_txpow_phase = 0;
+            break;
+        default:
+            break;
         }
         break;
     }
