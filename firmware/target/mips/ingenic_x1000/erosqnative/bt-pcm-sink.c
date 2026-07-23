@@ -144,6 +144,34 @@ static struct {
     bool     vbr;
 } s_aac_cfg;
 
+/* ---- adaptive AAC bitrate ----
+ *
+ * The negotiated AAC bit_rate is a *maximum* (AVDTP: "the Available Maximum
+ * Bit Rate") and LATM carries no rate field — every AudioMuxElement is
+ * self-contained — so the encoder can be swapped to a lower rate mid-stream
+ * with zero renegotiation. Apple sources do exactly this on marginal RF.
+ *
+ * Trigger: the send-gap detector in post_send. Gaps are controller-side
+ * retransmit stalls; several inside a short window mean the link is
+ * genuinely struggling (outdoor body-shadowed path — no indoor multipath
+ * to fill the null). Smaller frames buy margin twice: less airtime per
+ * frame AND fewer baseband fragments per packet (~190 B at 64 kbps rides
+ * one DH3; ~380 B at 128 kbps spans three). Recovery goes one step at a
+ * time after a sustained clean stretch so one dead spot doesn't pin
+ * quality low for the whole walk. The adapted rate deliberately survives
+ * suspend/resume — pausing playback doesn't reset the RF environment.
+ * All of this state is BT-thread-only. */
+#define AAC_ADAPT_GAP_MS       200   /* a send gap this long counts as distress */
+#define AAC_ADAPT_WINDOW_MS  10000   /* ...when it lands within this window   */
+#define AAC_ADAPT_TRIGGER        3   /* this many distress gaps -> downshift  */
+#define AAC_ADAPT_RECOVER_MS 60000   /* clean this long -> upshift one step   */
+static uint32_t s_aac_cur_bitrate;    /* current encode rate (<= negotiated) */
+static bool     s_aac_rate_pending;   /* swap encoder at next idle point */
+static int      s_adapt_gap_count;
+static uint32_t s_adapt_win_start;    /* start of current distress window (0 = none) */
+static uint32_t s_adapt_last_bad_ms;  /* last distress gap (0 = never) */
+static uint32_t s_adapt_last_shift_ms;/* last rate shift / stream start */
+
 /* ---- audio pacing ----
  *
  * The canonical BTstack demo uses AUDIO_TIMEOUT_MS=10 and relies on the
@@ -261,6 +289,62 @@ static void fill_sbc(void)
     }
 }
 
+static void aac_encoder_setup(void);
+
+static uint32_t aac_adapt_step_down(uint32_t cur)
+{
+    if(cur > 96000) return 96000;
+    if(cur > 64000) return 64000;
+    return cur;                       /* already at the floor */
+}
+
+static uint32_t aac_adapt_step_up(uint32_t cur, uint32_t ceiling)
+{
+    uint32_t next = (cur < 96000) ? 96000 : ceiling;
+    return next > ceiling ? ceiling : next;
+}
+
+/* Feed one send-gap measurement to the adaptive-bitrate logic. Downshifts
+ * (via s_aac_rate_pending; audio_tick applies it between frames) once
+ * AAC_ADAPT_TRIGGER distress gaps land inside one window. */
+static void aac_adapt_note_gap(uint32_t now, uint32_t dt)
+{
+    if(dt < AAC_ADAPT_GAP_MS) return;
+    s_adapt_last_bad_ms = now;
+    if(s_adapt_win_start == 0 || now - s_adapt_win_start > AAC_ADAPT_WINDOW_MS) {
+        s_adapt_win_start = now;
+        s_adapt_gap_count = 1;
+        return;
+    }
+    if(++s_adapt_gap_count < AAC_ADAPT_TRIGGER) return;
+    s_adapt_gap_count = 0;
+    s_adapt_win_start = 0;
+    uint32_t next = aac_adapt_step_down(s_aac_cur_bitrate);
+    if(next == s_aac_cur_bitrate) return;
+    bt_link_logf("AAC rate %lu -> %lu (gaps)",
+                 (unsigned long)s_aac_cur_bitrate, (unsigned long)next);
+    s_aac_cur_bitrate     = next;
+    s_aac_rate_pending    = true;
+    s_adapt_last_shift_ms = now;
+}
+
+/* Upshift one step after AAC_ADAPT_RECOVER_MS with no distress gap and no
+ * recent shift. Called each audio_tick — a few compares, cheap at 100 Hz. */
+static void aac_adapt_maybe_recover(uint32_t now)
+{
+    if(s_aac_rate_pending || s_aac_cur_bitrate >= s_aac_cfg.bit_rate) return;
+    if(now - s_adapt_last_bad_ms   < AAC_ADAPT_RECOVER_MS
+       && s_adapt_last_bad_ms != 0) return;
+    if(now - s_adapt_last_shift_ms < AAC_ADAPT_RECOVER_MS) return;
+    uint32_t next = aac_adapt_step_up(s_aac_cur_bitrate, s_aac_cfg.bit_rate);
+    if(next == s_aac_cur_bitrate) return;
+    bt_link_logf("AAC rate %lu -> %lu (clean)",
+                 (unsigned long)s_aac_cur_bitrate, (unsigned long)next);
+    s_aac_cur_bitrate     = next;
+    s_aac_rate_pending    = true;
+    s_adapt_last_shift_ms = now;
+}
+
 /* Common post-send bookkeeping: stretch detector + log non-zero rc.
  * Called by both codecs' send paths so the link-log signal is consistent
  * regardless of which codec is active. */
@@ -275,6 +359,7 @@ static void post_send(uint8_t rc, unsigned bytes)
          * missed canonical sends, well outside normal jitter and safely
          * below the audio underrun horizon. */
         if(dt > 50) bt_link_logf("send gap %lu ms", (unsigned long)dt);
+        if(s_codec == BT_PCM_CODEC_AAC) aac_adapt_note_gap(now, dt);
     }
     s_last_send_ms = now;
 }
@@ -401,6 +486,16 @@ static void audio_tick(btstack_timer_source_t* t)
          * audio_tick reentrant-ish use to push it close. */
         static int16_t aac_pcm[1024 * 2];
         if (s_aac_ready_to_send || s_aac_payload_size > 0) return;
+        /* Idle point between frames — no payload pending, encoder not
+         * mid-anything — so an adaptive rate change can swap the encoder
+         * here. vo-aacenc re-primes over its first frame or two (~46 ms of
+         * lookahead); the sink's jitter buffer rides that out, and shifts
+         * only ever happen during already-glitchy stretches anyway. */
+        if (s_aac_rate_pending) {
+            s_aac_rate_pending = false;
+            aac_encoder_setup();
+        }
+        aac_adapt_maybe_recover(now);
         if (!s_aac_enc || s_samples_ready < s_aac_input_samples) return;
         pull_pcm(aac_pcm, s_aac_input_samples);
         s_samples_ready -= s_aac_input_samples;
@@ -463,8 +558,11 @@ static void aac_encoder_setup(void)
     /* Tear down any previous encoder before allocating a fresh one — the
      * sink can be re-configured if the peer renegotiates. */
     if(s_aac_enc) { bt_aac_encoder_free(s_aac_enc); s_aac_enc = NULL; }
+    /* Encode at the adaptive rate, never above the negotiated maximum. */
+    if(s_aac_cur_bitrate == 0 || s_aac_cur_bitrate > s_aac_cfg.bit_rate)
+        s_aac_cur_bitrate = s_aac_cfg.bit_rate;
     s_aac_enc = bt_aac_encoder_init(s_aac_cfg.sample_rate, s_aac_cfg.channels,
-                                    s_aac_cfg.bit_rate, s_aac_cfg.vbr);
+                                    s_aac_cur_bitrate, s_aac_cfg.vbr);
     if(s_aac_enc) {
         s_aac_input_samples = bt_aac_encoder_input_samples(s_aac_enc);
         s_aac_max_output    = bt_aac_encoder_max_output(s_aac_enc);
@@ -483,6 +581,9 @@ void bt_pcm_sink_set_aac_config(uint32_t sample_rate, uint8_t channels,
     s_aac_cfg.channels    = channels;
     s_aac_cfg.bit_rate    = bit_rate;
     s_aac_cfg.vbr         = vbr;
+    /* Fresh negotiation resets the adaptive rate to the new ceiling. */
+    s_aac_cur_bitrate     = bit_rate;
+    s_aac_rate_pending    = false;
     aac_encoder_setup();
 }
 
@@ -512,6 +613,15 @@ void bt_pcm_sink_start_streaming(uint16_t a2dp_cid, uint8_t local_seid)
     s_aac_win_packets    = 0;
     s_aac_win_bytes      = 0;
     s_aac_last_size      = 0;
+    /* Adaptive-bitrate counters restart per stream, but s_aac_cur_bitrate
+     * itself carries over — resuming from pause doesn't change the RF.
+     * Seeding last_shift with "now" also delays the first upshift until
+     * the stream has proven itself clean for a full recovery period. */
+    s_adapt_gap_count     = 0;
+    s_adapt_win_start     = 0;
+    s_adapt_last_bad_ms   = 0;
+    s_adapt_last_shift_ms = btstack_run_loop_get_time_ms();
+    s_aac_rate_pending    = false;
     s_time_sent_ms       = 0;
     s_acc_missed         = 0;
     s_samples_ready      = 0;
