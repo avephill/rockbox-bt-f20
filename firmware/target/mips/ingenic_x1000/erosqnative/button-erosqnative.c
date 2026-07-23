@@ -106,9 +106,15 @@ volatile signed int enc_position = 0;
 #define WHEEL_ACCEL_DECAY    4  /* drain per 10 ms poll */
 #define WHEEL_ACCEL_MAX     80
 #define WHEEL_ACCEL_ENGAGE  32  /* counter level where accel kicks in */
-static int wheel_accel;
-static int wheel_accel_shift = 2;  /* multiplier slope above the knee */
-static int wheel_delta_cap   = 8;  /* ...clamped to this many items */
+static int  wheel_accel;
+static int  wheel_accel_shift = 2; /* multiplier slope above the knee */
+static int  wheel_delta_cap   = 8; /* ...clamped to this many items */
+static long wheel_last_detent;     /* tick of the previous detent */
+static int  wheel_last_btn;        /* direction of the previous detent */
+/* A pause this long between detents means the wheel stopped: the counter
+ * hard-resets so the very next click after any pause is exactly 1 item —
+ * no lingering "deceleration" from the decay tail. */
+#define WHEEL_ACCEL_IDLE_RESET (HZ/10)
 
 /* Strength levels for the "Wheel Acceleration" setting:
  * 0=off, 1=weak (max x4), 2=moderate (max x8), 3=strong (max x16). */
@@ -126,8 +132,15 @@ void button_wheel_set_accel(int level)
  * many detents accumulated since the last poll (>= 1) — a fast spin can
  * land several inside one 10 ms poll window; folding them all in keeps
  * that energy instead of losing it to the one-event-per-poll bottleneck. */
-static unsigned wheel_accel_data(int steps)
+static unsigned wheel_accel_data(int btn, int steps)
 {
+    /* stopped for a beat, or reversed direction -> all acceleration is
+     * forfeit immediately */
+    if (TIME_AFTER(current_tick, wheel_last_detent + WHEEL_ACCEL_IDLE_RESET)
+        || btn != wheel_last_btn)
+        wheel_accel = 0;
+    wheel_last_detent = current_tick;
+    wheel_last_btn    = btn;
     int delta = 1;
     if (wheel_accel > WHEEL_ACCEL_ENGAGE)
         delta += (wheel_accel - WHEEL_ACCEL_ENGAGE) >> wheel_accel_shift;
@@ -137,7 +150,8 @@ static unsigned wheel_accel_data(int steps)
     return (unsigned)delta << 24;
 }
 #else
-static unsigned wheel_accel_data(int steps) { (void)steps; return 1u << 24; }
+static unsigned wheel_accel_data(int btn, int steps)
+{ (void)btn; (void)steps; return 1u << 24; }
 #endif
 
 /* Value of headphone detect register */
@@ -412,7 +426,8 @@ int button_read_device(void)
     {
         /* need to use queue_post() in order to do BUTTON_SCROLL_*,
          * Rockbox treats these buttons differently. */
-        button_queue_post(BUTTON_SCROLL_FWD, wheel_accel_data(enc_position / 2));
+        button_queue_post(BUTTON_SCROLL_FWD,
+                          wheel_accel_data(BUTTON_SCROLL_FWD, enc_position / 2));
         enc_position = 0;
         reset_poweroff_timer();
         backlight_on();
@@ -421,7 +436,8 @@ int button_read_device(void)
     {
         /* need to use queue_post() in order to do BUTTON_SCROLL_*,
          * Rockbox treats these buttons differently. */
-        button_queue_post(BUTTON_SCROLL_BACK, wheel_accel_data(-enc_position / 2));
+        button_queue_post(BUTTON_SCROLL_BACK,
+                          wheel_accel_data(BUTTON_SCROLL_BACK, -enc_position / 2));
         enc_position = 0;
         reset_poweroff_timer();
         backlight_on();

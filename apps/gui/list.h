@@ -215,6 +215,12 @@ extern int gui_synclist_get_nb_items(struct gui_synclist * lists);
 extern int  gui_synclist_get_sel_pos(struct gui_synclist * lists);
 
 extern void gui_synclist_draw(struct gui_synclist * lists);
+#ifdef HAVE_WHEEL_SCROLL_LETTER
+/* Paint the fast-scroll letter card into the current frame; called by
+ * list_draw just before it pushes the frame (no-op unless armed). */
+extern void gui_synclist_wheel_overlay_paint(struct screen *display,
+                                             struct gui_synclist *lists);
+#endif
 extern void gui_synclist_scroll_stop(struct gui_synclist *lists);
 extern void gui_synclist_select_item(struct gui_synclist * lists,
                                      int item_number);

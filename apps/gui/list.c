@@ -64,10 +64,12 @@ static struct gui_synclist *current_lists;
  * doesn't wait for the next keypress). Togglable via the "Fast-scroll
  * Letter Popup" setting.
  *
- * Drawing happens AFTER list_draw has already pushed its frame to the
- * LCD, so the card must push its own rectangle (update_viewport_rect) —
- * the first cut skipped that and the card only reached the glass one
- * event late, strobing against every subsequent repaint.
+ * The card is painted INTO the frame: list_draw calls
+ * gui_synclist_wheel_overlay_paint() just before its final
+ * update_viewport(), so the pushed frame already contains the card and
+ * there is nothing to strobe or tear against. (The first cut painted
+ * after the push and flashed; the second pushed the card as a separate
+ * rectangle and the camera caught the tear between the two pushes.)
  *
  * Rockbox can't scale fonts, and the UI font is small next to Apple's
  * glyph — so on colour displays the glyph is rendered once at 1x,
@@ -114,13 +116,19 @@ static void wheel_overlay_note(struct gui_synclist *lists, int delta)
                      WHEEL_OVERLAY_TIMEOUT + 1, 0);
 }
 
-static void wheel_overlay_draw(struct screen *display,
-                               struct gui_synclist *lists)
+/* Paint the card into the current frame. Called by list_draw right
+ * before its final update_viewport(), with the list's parent viewport
+ * already active — nothing here pushes to the LCD. */
+void gui_synclist_wheel_overlay_paint(struct screen *display,
+                                      struct gui_synclist *lists)
 {
+    if (!wheel_overlay_char
+        || !TIME_BEFORE(current_tick, wheel_overlay_expiry))
+        return;
     struct viewport *vp = lists->parent[display->screen_type];
     char str[2] = { wheel_overlay_char, '\0' };
     int fw, fh;
-    display->set_viewport(vp);
+    struct viewport *last_vp = display->set_viewport(vp);
     display->getstringsize(str, &fw, &fh);
 #if LCD_DEPTH > 1
     bool dbl = (fw <= WHEEL_OVERLAY_MAX_GLYPH && fh <= WHEEL_OVERLAY_MAX_GLYPH);
@@ -182,10 +190,7 @@ static void wheel_overlay_draw(struct screen *display,
     display->putsxy(bx + (box - fw) / 2, by + (box - fh) / 2, str);
     display->set_drawmode(DRMODE_SOLID);
 #endif
-    /* list_draw already pushed its (card-less) frame; push the card's
-     * rectangle or it never reaches the glass this event */
-    display->update_viewport_rect(bx, by, box, box);
-    display->set_viewport(NULL);
+    display->set_viewport(last_vp);
 }
 #endif /* HAVE_WHEEL_SCROLL_LETTER */
 
@@ -374,13 +379,6 @@ void gui_synclist_draw(struct gui_synclist *gui_list)
         if (!skinlist_draw(&screens[i], gui_list))
             list_draw(&screens[i], gui_list);
     }
-#ifdef HAVE_WHEEL_SCROLL_LETTER
-    if (wheel_overlay_char && TIME_BEFORE(current_tick, wheel_overlay_expiry))
-    {
-        FOR_NB_SCREENS(i)
-            wheel_overlay_draw(&screens[i], gui_list);
-    }
-#endif
 }
 
 /* sets up the list so the selection is shown correctly on the screen */
@@ -846,9 +844,11 @@ bool gui_synclist_do_button(struct gui_synclist * lists, int *actionptr)
 #ifdef HAVE_WHEEL_SCROLL_LETTER
             wheel_overlay_note(lists, next_item_modifier);
 #endif
-#ifndef HAVE_WHEEL_ACCELERATION
+            /* Framedrop applies on wheel targets too: redrawing on every
+             * accelerated wheel event makes the draw slower than the
+             * event rate, the queue backs up, and the cursor coasts on
+             * for the backlog's worth of events after the wheel stops. */
             if (button_queue_count() < FRAMEDROP_TRIGGER)
-#endif
                 gui_synclist_draw(lists);
             yield();
             *actionptr = ACTION_STD_PREV;
@@ -862,9 +862,8 @@ bool gui_synclist_do_button(struct gui_synclist * lists, int *actionptr)
 #ifdef HAVE_WHEEL_SCROLL_LETTER
             wheel_overlay_note(lists, next_item_modifier);
 #endif
-#ifndef HAVE_WHEEL_ACCELERATION
+            /* see ACTION_STD_PREV: framedrop prevents post-release coast */
             if (button_queue_count() < FRAMEDROP_TRIGGER)
-#endif
                 gui_synclist_draw(lists);
             yield();
             *actionptr = ACTION_STD_NEXT;

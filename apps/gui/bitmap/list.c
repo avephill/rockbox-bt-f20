@@ -447,6 +447,11 @@ void list_draw(struct screen *display, struct gui_synclist *list)
         callback_draw_item(&list_info);
     }
     display->set_viewport(parent);
+#ifdef HAVE_WHEEL_SCROLL_LETTER
+    /* paint the fast-scroll letter card into the frame BEFORE the push,
+     * so the card can't flash or tear against a separate update */
+    gui_synclist_wheel_overlay_paint(display, list);
+#endif
     display->update_viewport();
     display->set_viewport(last_vp);
 }
