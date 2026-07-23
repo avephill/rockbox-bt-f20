@@ -52,6 +52,74 @@ static long last_dirty_tick;
 static struct viewport parent[NB_SCREENS];
 static struct gui_synclist *current_lists;
 
+#ifdef HAVE_WHEEL_ACCELERATION
+/* ---- fast-scroll letter overlay (iPod-classic style) ----
+ *
+ * While the wheel is accelerating hard through a long list, pop a box in
+ * the middle of the list showing the first character of the selected
+ * item — enough to steer by in a sorted list when individual entries fly
+ * past too fast to read. The overlay is armed by accelerated wheel
+ * events, painted on top of every full list redraw while armed, and
+ * expires half a second after the last fast event (a kernel timeout
+ * posts BUTTON_REDRAW so the expiring repaint doesn't wait for the next
+ * keypress). */
+#define WHEEL_OVERLAY_MIN_DELTA  4      /* step multiplier that arms it */
+#define WHEEL_OVERLAY_MIN_ITEMS  40     /* only in lists worth jumping through */
+#define WHEEL_OVERLAY_TIMEOUT    (HZ/2)
+static long wheel_overlay_expiry;
+static char wheel_overlay_char;
+static struct timeout wheel_overlay_tmo;
+
+static int wheel_overlay_expire_cb(struct timeout *tmo)
+{
+    (void)tmo;
+    button_queue_post(BUTTON_REDRAW, 0);
+    return 0;   /* one-shot */
+}
+
+static void wheel_overlay_note(struct gui_synclist *lists, int delta)
+{
+    if (delta < WHEEL_OVERLAY_MIN_DELTA
+        || lists->nb_items < WHEEL_OVERLAY_MIN_ITEMS
+        || !lists->callback_get_item_name)
+        return;
+    char buf[MAX_PATH];
+    const char *name = lists->callback_get_item_name(lists->selected_item,
+                                                     lists->data,
+                                                     buf, sizeof(buf));
+    char c = name ? name[0] : '\0';
+    if (c >= 'a' && c <= 'z')
+        c -= 'a' - 'A';
+    else if (!(c >= 'A' && c <= 'Z'))
+        c = '#';    /* digits, punctuation, UTF-8 lead bytes */
+    wheel_overlay_char   = c;
+    wheel_overlay_expiry = current_tick + WHEEL_OVERLAY_TIMEOUT;
+    timeout_register(&wheel_overlay_tmo, wheel_overlay_expire_cb,
+                     WHEEL_OVERLAY_TIMEOUT + 1, 0);
+}
+
+static void wheel_overlay_draw(struct screen *display,
+                               struct gui_synclist *lists)
+{
+    struct viewport *vp = lists->parent[display->screen_type];
+    char str[2] = { wheel_overlay_char, '\0' };
+    int fw, fh;
+    display->set_viewport(vp);
+    display->getstringsize(str, &fw, &fh);
+    int box = 2 * MAX(fw, fh);
+    int x = (vp->width  - box) / 2;
+    int y = (vp->height - box) / 2;
+    /* solid box in the foreground colour, letter knocked out in the
+     * background colour — the same inverse look as the selection bar */
+    display->set_drawmode(DRMODE_SOLID);
+    display->fillrect(x, y, box, box);
+    display->set_drawmode(DRMODE_SOLID | DRMODE_INVERSEVID);
+    display->putsxy(x + (box - fw) / 2, y + (box - fh) / 2, str);
+    display->set_drawmode(DRMODE_SOLID);
+    display->set_viewport(NULL);
+}
+#endif /* HAVE_WHEEL_ACCELERATION */
+
 static bool list_is_dirty(struct gui_synclist *list)
 {
     return TIME_BEFORE(list->dirty_tick, last_dirty_tick);
@@ -237,6 +305,13 @@ void gui_synclist_draw(struct gui_synclist *gui_list)
         if (!skinlist_draw(&screens[i], gui_list))
             list_draw(&screens[i], gui_list);
     }
+#ifdef HAVE_WHEEL_ACCELERATION
+    if (wheel_overlay_char && TIME_BEFORE(current_tick, wheel_overlay_expiry))
+    {
+        FOR_NB_SCREENS(i)
+            wheel_overlay_draw(&screens[i], gui_list);
+    }
+#endif
 }
 
 /* sets up the list so the selection is shown correctly on the screen */
@@ -699,6 +774,9 @@ bool gui_synclist_do_button(struct gui_synclist * lists, int *actionptr)
         case ACTION_STD_PREV:
 
             gui_list_select_at_offset(lists, -next_item_modifier, allow_wrap);
+#ifdef HAVE_WHEEL_ACCELERATION
+            wheel_overlay_note(lists, next_item_modifier);
+#endif
 #ifndef HAVE_WHEEL_ACCELERATION
             if (button_queue_count() < FRAMEDROP_TRIGGER)
 #endif
@@ -712,6 +790,9 @@ bool gui_synclist_do_button(struct gui_synclist * lists, int *actionptr)
             /*Fallthrough*/
         case ACTION_STD_NEXT:
             gui_list_select_at_offset(lists, next_item_modifier, allow_wrap);
+#ifdef HAVE_WHEEL_ACCELERATION
+            wheel_overlay_note(lists, next_item_modifier);
+#endif
 #ifndef HAVE_WHEEL_ACCELERATION
             if (button_queue_count() < FRAMEDROP_TRIGGER)
 #endif

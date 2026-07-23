@@ -82,18 +82,31 @@ volatile signed int enc_position = 0;
  *
  * A decaying activity counter tracks how energetically the wheel is being
  * spun: each detent adds WHEEL_ACCEL_INC, each 10 ms button poll subtracts
- * 1. Sustained fast spinning drives the counter toward WHEEL_ACCEL_MAX;
- * slow clicking decays back to ~0 between detents. The list-step
- * multiplier posted with each BUTTON_SCROLL_* event is the counter value
- * *before* this detent's increment (so an isolated click is always
- * exactly 1 item), shifted and capped per the user's "Wheel Acceleration"
- * setting. The multiplier rides in button-data bits 24..30, bit 31 clear
- * — button_apply_acceleration() returns it as-is (the e200v2 scheme; the
- * iPod velocity curve is only for data with bit 31 set). */
-#define WHEEL_ACCEL_INC 8
-#define WHEEL_ACCEL_MAX 64
+ * WHEEL_ACCEL_DECAY. The list-step multiplier posted with each
+ * BUTTON_SCROLL_* event is derived from the counter value *before* this
+ * detent's charge (so an isolated click is always exactly 1 item),
+ * shifted and capped per the user's "Wheel Acceleration" setting. The
+ * multiplier rides in button-data bits 24..30, bit 31 clear —
+ * button_apply_acceleration() returns it as-is (the e200v2 scheme; the
+ * iPod velocity curve is only for data with bit 31 set).
+ *
+ * The constants are tuned for an iPod-classic-like feel:
+ *  - charge/drain ratio puts the engage knife-edge around 20 detents/s —
+ *    below that the counter drains as fast as it charges and every click
+ *    is 1:1 fine control; genuinely fast flicking charges ~+200/s and
+ *    saturates in ~0.3 s;
+ *  - WHEEL_ACCEL_ENGAGE keeps the multiplier at exactly 1 until the
+ *    counter clears the threshold, so acceleration snaps in rather than
+ *    creeping in at moderate speeds;
+ *  - the heavy drain means ~150 ms after you stop spinning the counter
+ *    is empty — a careful single click right after a big flick lands on
+ *    the very next item, like the real thing. */
+#define WHEEL_ACCEL_INC     20  /* charge per detent */
+#define WHEEL_ACCEL_DECAY    4  /* drain per 10 ms poll */
+#define WHEEL_ACCEL_MAX     64
+#define WHEEL_ACCEL_ENGAGE  16  /* counter level where accel kicks in */
 static int wheel_accel;
-static int wheel_accel_shift = 2;  /* multiplier = counter >> shift */
+static int wheel_accel_shift = 2;  /* multiplier slope above the knee */
 static int wheel_delta_cap   = 8;  /* ...clamped to this many items */
 
 /* Strength levels for the "Wheel Acceleration" setting:
@@ -114,8 +127,9 @@ void button_wheel_set_accel(int level)
  * that energy instead of losing it to the one-event-per-poll bottleneck. */
 static unsigned wheel_accel_data(int steps)
 {
-    int delta = wheel_accel >> wheel_accel_shift;
-    if (delta < 1) delta = 1;
+    int delta = 1;
+    if (wheel_accel > WHEEL_ACCEL_ENGAGE)
+        delta += (wheel_accel - WHEEL_ACCEL_ENGAGE) >> wheel_accel_shift;
     if (delta > wheel_delta_cap) delta = wheel_delta_cap;
     wheel_accel += WHEEL_ACCEL_INC * steps;
     if (wheel_accel > WHEEL_ACCEL_MAX) wheel_accel = WHEEL_ACCEL_MAX;
@@ -387,9 +401,10 @@ int button_read_device(void)
 #endif
 
 #ifndef BOOTLOADER
-    /* wheel-acceleration decay: one unit per 10 ms poll */
-    if (wheel_accel > 0)
-        wheel_accel--;
+    /* wheel-acceleration drain, once per 10 ms poll */
+    wheel_accel -= WHEEL_ACCEL_DECAY;
+    if (wheel_accel < 0)
+        wheel_accel = 0;
 #endif
     /* check encoder - from testing, each indent is 2 state changes or so */
     if (enc_position > 1)
