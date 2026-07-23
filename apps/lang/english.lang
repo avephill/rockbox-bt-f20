@@ -17162,3 +17162,20 @@
     erosqnative: "Wheel Acceleration"
   </voice>
 </phrase>
+<phrase>
+  id: LANG_WHEEL_SCROLL_LETTER
+  desc: in settings_menu
+  user: core
+  <source>
+    *: none
+    erosqnative: "Fast-scroll Letter Popup"
+  </source>
+  <dest>
+    *: none
+    erosqnative: "Fast-scroll Letter Popup"
+  </dest>
+  <voice>
+    *: none
+    erosqnative: "Fast-scroll Letter Popup"
+  </voice>
+</phrase>

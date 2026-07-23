@@ -52,23 +52,38 @@ static long last_dirty_tick;
 static struct viewport parent[NB_SCREENS];
 static struct gui_synclist *current_lists;
 
-#ifdef HAVE_WHEEL_ACCELERATION
+#ifdef HAVE_WHEEL_SCROLL_LETTER
 /* ---- fast-scroll letter overlay (iPod-classic style) ----
  *
- * While the wheel is accelerating hard through a long list, pop a box in
- * the middle of the list showing the first character of the selected
- * item — enough to steer by in a sorted list when individual entries fly
- * past too fast to read. The overlay is armed by accelerated wheel
- * events, painted on top of every full list redraw while armed, and
- * expires half a second after the last fast event (a kernel timeout
- * posts BUTTON_REDRAW so the expiring repaint doesn't wait for the next
- * keypress). */
+ * While the wheel is accelerating hard through a long list, pop a card
+ * mid-list showing the first character of the selected item — enough to
+ * steer by in a sorted list when individual entries fly past too fast to
+ * read. Armed by accelerated wheel events, painted on top of every full
+ * list redraw while armed, expiring half a second after the last fast
+ * event (a kernel timeout posts BUTTON_REDRAW so the expiring repaint
+ * doesn't wait for the next keypress). Togglable via the "Fast-scroll
+ * Letter Popup" setting.
+ *
+ * Drawing happens AFTER list_draw has already pushed its frame to the
+ * LCD, so the card must push its own rectangle (update_viewport_rect) —
+ * the first cut skipped that and the card only reached the glass one
+ * event late, strobing against every subsequent repaint.
+ *
+ * Rockbox can't scale fonts, and the UI font is small next to Apple's
+ * glyph — so on colour displays the glyph is rendered once at 1x,
+ * copied out of the framebuffer, and pixel-doubled back in (row-major
+ * fb only, which every colour target here is). */
 #define WHEEL_OVERLAY_MIN_DELTA  4      /* step multiplier that arms it */
 #define WHEEL_OVERLAY_MIN_ITEMS  40     /* only in lists worth jumping through */
 #define WHEEL_OVERLAY_TIMEOUT    (HZ/2)
+#define WHEEL_OVERLAY_MAX_GLYPH  40     /* 1x glyph cap for the doubling buffer */
 static long wheel_overlay_expiry;
 static char wheel_overlay_char;
 static struct timeout wheel_overlay_tmo;
+#if LCD_DEPTH > 1
+static fb_data wheel_overlay_glyph[WHEEL_OVERLAY_MAX_GLYPH
+                                   * WHEEL_OVERLAY_MAX_GLYPH];
+#endif
 
 static int wheel_overlay_expire_cb(struct timeout *tmo)
 {
@@ -79,7 +94,8 @@ static int wheel_overlay_expire_cb(struct timeout *tmo)
 
 static void wheel_overlay_note(struct gui_synclist *lists, int delta)
 {
-    if (delta < WHEEL_OVERLAY_MIN_DELTA
+    if (!global_settings.wheel_scroll_letter
+        || delta < WHEEL_OVERLAY_MIN_DELTA
         || lists->nb_items < WHEEL_OVERLAY_MIN_ITEMS
         || !lists->callback_get_item_name)
         return;
@@ -106,19 +122,72 @@ static void wheel_overlay_draw(struct screen *display,
     int fw, fh;
     display->set_viewport(vp);
     display->getstringsize(str, &fw, &fh);
+#if LCD_DEPTH > 1
+    bool dbl = (fw <= WHEEL_OVERLAY_MAX_GLYPH && fh <= WHEEL_OVERLAY_MAX_GLYPH);
+    int gw = dbl ? fw * 2 : fw;
+    int gh = dbl ? fh * 2 : fh;
+    int box = MAX(gw, gh) + fh;         /* glyph + ~half-glyph padding */
+    if (box > vp->height) box = vp->height;
+    int bx = (vp->width  - box) / 2;
+    int by = (vp->height - box) / 2;
+    unsigned old_fg = display->get_foreground();
+    /* black card, white keyline, white letter — high contrast no matter
+     * what the theme colours are */
+    display->set_drawmode(DRMODE_SOLID);
+    display->set_foreground(LCD_BLACK);
+    display->fillrect(bx, by, box, box);
+    display->set_foreground(LCD_WHITE);
+    display->drawrect(bx + 1, by + 1, box - 2, box - 2);
+    display->set_drawmode(DRMODE_FG);   /* glyph pixels only */
+    int tx = bx + (box - fw) / 2;
+    int ty = by + (box - fh) / 2;
+    display->putsxy(tx, ty, str);
+    if (dbl)
+    {
+        /* copy the 1x glyph out of the framebuffer... */
+        for (int row = 0; row < fh; row++)
+            memcpy(&wheel_overlay_glyph[row * fw],
+                   FBADDR(vp->x + tx, vp->y + ty + row),
+                   fw * sizeof(fb_data));
+        /* ...erase it... */
+        display->set_drawmode(DRMODE_SOLID);
+        display->set_foreground(LCD_BLACK);
+        display->fillrect(tx, ty, fw, fh);
+        /* ...and write it back doubled, centred on the card */
+        int dx = vp->x + bx + (box - gw) / 2;
+        int dy = vp->y + by + (box - gh) / 2;
+        for (int row = 0; row < fh; row++)
+        {
+            fb_data *src = &wheel_overlay_glyph[row * fw];
+            fb_data *r0  = FBADDR(dx, dy + row * 2);
+            fb_data *r1  = FBADDR(dx, dy + row * 2 + 1);
+            for (int col = 0; col < fw; col++)
+            {
+                fb_data px = src[col];
+                r0[col * 2] = r0[col * 2 + 1] = px;
+                r1[col * 2] = r1[col * 2 + 1] = px;
+            }
+        }
+    }
+    display->set_drawmode(DRMODE_SOLID);
+    display->set_foreground(old_fg);
+#else
+    /* mono/grey: inverse-video card, 1x letter */
     int box = 2 * MAX(fw, fh);
-    int x = (vp->width  - box) / 2;
-    int y = (vp->height - box) / 2;
-    /* solid box in the foreground colour, letter knocked out in the
-     * background colour — the same inverse look as the selection bar */
+    int bx = (vp->width  - box) / 2;
+    int by = (vp->height - box) / 2;
     display->set_drawmode(DRMODE_SOLID);
-    display->fillrect(x, y, box, box);
+    display->fillrect(bx, by, box, box);
     display->set_drawmode(DRMODE_SOLID | DRMODE_INVERSEVID);
-    display->putsxy(x + (box - fw) / 2, y + (box - fh) / 2, str);
+    display->putsxy(bx + (box - fw) / 2, by + (box - fh) / 2, str);
     display->set_drawmode(DRMODE_SOLID);
+#endif
+    /* list_draw already pushed its (card-less) frame; push the card's
+     * rectangle or it never reaches the glass this event */
+    display->update_viewport_rect(bx, by, box, box);
     display->set_viewport(NULL);
 }
-#endif /* HAVE_WHEEL_ACCELERATION */
+#endif /* HAVE_WHEEL_SCROLL_LETTER */
 
 static bool list_is_dirty(struct gui_synclist *list)
 {
@@ -305,7 +374,7 @@ void gui_synclist_draw(struct gui_synclist *gui_list)
         if (!skinlist_draw(&screens[i], gui_list))
             list_draw(&screens[i], gui_list);
     }
-#ifdef HAVE_WHEEL_ACCELERATION
+#ifdef HAVE_WHEEL_SCROLL_LETTER
     if (wheel_overlay_char && TIME_BEFORE(current_tick, wheel_overlay_expiry))
     {
         FOR_NB_SCREENS(i)
@@ -774,7 +843,7 @@ bool gui_synclist_do_button(struct gui_synclist * lists, int *actionptr)
         case ACTION_STD_PREV:
 
             gui_list_select_at_offset(lists, -next_item_modifier, allow_wrap);
-#ifdef HAVE_WHEEL_ACCELERATION
+#ifdef HAVE_WHEEL_SCROLL_LETTER
             wheel_overlay_note(lists, next_item_modifier);
 #endif
 #ifndef HAVE_WHEEL_ACCELERATION
@@ -790,7 +859,7 @@ bool gui_synclist_do_button(struct gui_synclist * lists, int *actionptr)
             /*Fallthrough*/
         case ACTION_STD_NEXT:
             gui_list_select_at_offset(lists, next_item_modifier, allow_wrap);
-#ifdef HAVE_WHEEL_ACCELERATION
+#ifdef HAVE_WHEEL_SCROLL_LETTER
             wheel_overlay_note(lists, next_item_modifier);
 #endif
 #ifndef HAVE_WHEEL_ACCELERATION

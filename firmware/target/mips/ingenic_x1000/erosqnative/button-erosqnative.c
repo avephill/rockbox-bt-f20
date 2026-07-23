@@ -91,20 +91,21 @@ volatile signed int enc_position = 0;
  * iPod velocity curve is only for data with bit 31 set).
  *
  * The constants are tuned for an iPod-classic-like feel:
- *  - charge/drain ratio puts the engage knife-edge around 20 detents/s —
+ *  - charge/drain ratio puts the engage knife-edge around 25 detents/s —
  *    below that the counter drains as fast as it charges and every click
- *    is 1:1 fine control; genuinely fast flicking charges ~+200/s and
- *    saturates in ~0.3 s;
+ *    is 1:1 fine control;
  *  - WHEEL_ACCEL_ENGAGE keeps the multiplier at exactly 1 until the
- *    counter clears the threshold, so acceleration snaps in rather than
- *    creeping in at moderate speeds;
- *  - the heavy drain means ~150 ms after you stop spinning the counter
+ *    counter clears the threshold, so a single quick flick stays 1:1 and
+ *    only *sustained* fast spinning (~0.2-0.5 s of it) engages and then
+ *    saturates — retuned 2026-07-22 after the first cut engaged on any
+ *    casual flick;
+ *  - the heavy drain means ~200 ms after you stop spinning the counter
  *    is empty — a careful single click right after a big flick lands on
  *    the very next item, like the real thing. */
-#define WHEEL_ACCEL_INC     20  /* charge per detent */
+#define WHEEL_ACCEL_INC     16  /* charge per detent */
 #define WHEEL_ACCEL_DECAY    4  /* drain per 10 ms poll */
-#define WHEEL_ACCEL_MAX     64
-#define WHEEL_ACCEL_ENGAGE  16  /* counter level where accel kicks in */
+#define WHEEL_ACCEL_MAX     80
+#define WHEEL_ACCEL_ENGAGE  32  /* counter level where accel kicks in */
 static int wheel_accel;
 static int wheel_accel_shift = 2;  /* multiplier slope above the knee */
 static int wheel_delta_cap   = 8;  /* ...clamped to this many items */

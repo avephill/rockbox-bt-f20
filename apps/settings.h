@@ -810,6 +810,9 @@ struct user_settings
 #if defined(HAVE_WHEEL_ACCELERATION) && (CONFIG_KEYPAD == EROSQ_PAD)
     int wheel_accel; /* scroll-wheel acceleration: 0=off 1=weak 2=moderate 3=strong */
 #endif
+#ifdef HAVE_WHEEL_SCROLL_LETTER
+    bool wheel_scroll_letter; /* first-letter popup during fast wheel scrolling */
+#endif
 
 #ifdef HAVE_SPEAKER
     int speaker_mode; /* 0: off, 1: on, 2: auto (only if headphone detection) */

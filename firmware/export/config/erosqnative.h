@@ -115,6 +115,11 @@
 #define HAVE_WHEEL_ACCELERATION
 #define WHEEL_ACCEL_START 140
 #define WHEEL_ACCELERATION 1
+/* iPod-classic-style first-letter popup while the wheel fast-scrolls a
+ * long list (gui/list.c; user-togglable via the Fast-scroll Letter
+ * Popup setting). Split from HAVE_WHEEL_ACCELERATION so other wheel
+ * targets aren't dragged in. */
+#define HAVE_WHEEL_SCROLL_LETTER
 #define HAVE_HEADPHONE_DETECTION
 #define HAVE_LINEOUT_DETECTION
 

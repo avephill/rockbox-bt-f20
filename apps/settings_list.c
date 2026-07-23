@@ -1344,6 +1344,10 @@ const struct settings_list settings[] = {
                    ID2P(LANG_OFF), ID2P(LANG_WEAK), ID2P(LANG_MODERATE),
                    ID2P(LANG_STRONG)),
 #endif
+#ifdef HAVE_WHEEL_SCROLL_LETTER
+    OFFON_SETTING(0, wheel_scroll_letter, LANG_WHEEL_SCROLL_LETTER,
+                  true, "wheel scroll letter", NULL),
+#endif
     /* tuner */
 #if CONFIG_TUNER
     OFFON_SETTING(0, fm_force_mono, LANG_FM_MONO_MODE,
