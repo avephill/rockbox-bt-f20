@@ -38,6 +38,12 @@
 #define BUTTON_LEFT BUTTON_PREV
 #define BUTTON_RIGHT BUTTON_NEXT
 
+#ifndef BOOTLOADER
+/* Set scroll-wheel acceleration strength (the "Wheel Acceleration"
+ * setting): 0=off, 1=weak, 2=moderate, 3=strong. */
+void button_wheel_set_accel(int level);
+#endif
+
 /* Software power-off */
 #define POWEROFF_BUTTON BUTTON_POWER
 #define POWEROFF_COUNT  25

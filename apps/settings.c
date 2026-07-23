@@ -932,6 +932,9 @@ void settings_apply(bool read_disk)
 #ifdef HAVE_BUTTON_LIGHT
     buttonlight_set_timeout(global_settings.buttonlight_timeout);
 #endif
+#if defined(HAVE_WHEEL_ACCELERATION) && (CONFIG_KEYPAD == EROSQ_PAD)
+    button_wheel_set_accel(global_settings.wheel_accel);
+#endif
 #ifdef HAVE_DISK_STORAGE
     storage_spindown(global_settings.disk_spindown);
 #endif

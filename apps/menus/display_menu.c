@@ -330,6 +330,9 @@ MENUITEM_SETTING(list_accel_start_delay,
                  &global_settings.list_accel_start_delay, NULL);
 MENUITEM_SETTING(list_accel_wait, &global_settings.list_accel_wait, NULL);
 #endif /* HAVE_WHEEL_ACCELERATION */
+#if defined(HAVE_WHEEL_ACCELERATION) && (CONFIG_KEYPAD == EROSQ_PAD)
+MENUITEM_SETTING(wheel_accel, &global_settings.wheel_accel, NULL);
+#endif
 MENUITEM_SETTING(offset_out_of_view, &global_settings.offset_out_of_view, NULL);
 MENUITEM_SETTING(disable_mainmenu_scrolling, &global_settings.disable_mainmenu_scrolling, NULL);
 MENUITEM_SETTING(screen_scroll_step, &global_settings.screen_scroll_step, NULL);
@@ -352,6 +355,9 @@ MAKE_MENU(scroll_settings_menu, ID2P(LANG_SCROLL_MENU), 0, Icon_NOICON,
           &list_order,
 #ifndef HAVE_WHEEL_ACCELERATION
           &list_accel_start_delay, &list_accel_wait
+#endif
+#if defined(HAVE_WHEEL_ACCELERATION) && (CONFIG_KEYPAD == EROSQ_PAD)
+          &wheel_accel
 #endif
           );
 /*    SCROLL MENU                  */

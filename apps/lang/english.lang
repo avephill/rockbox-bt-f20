@@ -17145,3 +17145,20 @@
     erosqnative: "Link logging"
   </voice>
 </phrase>
+<phrase>
+  id: LANG_WHEEL_ACCELERATION
+  desc: in settings_menu
+  user: core
+  <source>
+    *: none
+    erosqnative: "Wheel Acceleration"
+  </source>
+  <dest>
+    *: none
+    erosqnative: "Wheel Acceleration"
+  </dest>
+  <voice>
+    *: none
+    erosqnative: "Wheel Acceleration"
+  </voice>
+</phrase>

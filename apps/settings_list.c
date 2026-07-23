@@ -83,6 +83,13 @@ void bt_link_log_set_enabled(bool en);
 static void bt_link_logging_set(int value) { bt_link_log_set_enabled(value != 0); }
 #endif
 
+#if defined(HAVE_WHEEL_ACCELERATION) && (CONFIG_KEYPAD == EROSQ_PAD)
+/* Defined in the erosqnative button driver (declared in button-target.h,
+ * which "button.h" pulls in above). Applies the "Wheel Acceleration"
+ * strength live from the settings menu. */
+static void wheel_accel_set(int value) { button_wheel_set_accel(value); }
+#endif
+
 #define UNUSED {.RESERVED=NULL}
 #define INT(a) {.int_ = a}
 #define UINT(a) {.uint_ = a}
@@ -1329,6 +1336,13 @@ const struct settings_list settings[] = {
                    ID2P(LANG_BT_BITRATE_64)),
     OFFON_SETTING(0, bt_link_logging, LANG_BT_LINK_LOGGING,
                   false, "bt link logging", bt_link_logging_set),
+#endif
+#if defined(HAVE_WHEEL_ACCELERATION) && (CONFIG_KEYPAD == EROSQ_PAD)
+    CHOICE_SETTING(0, wheel_accel, LANG_WHEEL_ACCELERATION, 2,
+                   "wheel acceleration", "off,weak,moderate,strong",
+                   wheel_accel_set, 4,
+                   ID2P(LANG_OFF), ID2P(LANG_WEAK), ID2P(LANG_MODERATE),
+                   ID2P(LANG_STRONG)),
 #endif
     /* tuner */
 #if CONFIG_TUNER

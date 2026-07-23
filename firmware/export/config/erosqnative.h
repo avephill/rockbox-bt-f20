@@ -107,6 +107,14 @@
 /* Button defines */
 #define CONFIG_KEYPAD   EROSQ_PAD
 #define HAVE_SCROLLWHEEL
+/* Wheel acceleration: the button driver posts a precomputed list-step
+ * multiplier in the button data (e200v2 style, bit 31 clear), so the
+ * shared framework's velocity curve below is compiled but not exercised.
+ * Strength is a user setting ("Wheel Acceleration" in the Scroll menu)
+ * applied via button_wheel_set_accel(). */
+#define HAVE_WHEEL_ACCELERATION
+#define WHEEL_ACCEL_START 140
+#define WHEEL_ACCELERATION 1
 #define HAVE_HEADPHONE_DETECTION
 #define HAVE_LINEOUT_DETECTION
 

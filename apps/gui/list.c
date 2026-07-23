@@ -608,6 +608,11 @@ bool gui_synclist_do_button(struct gui_synclist * lists, int *actionptr)
 
 #ifdef HAVE_WHEEL_ACCELERATION
     int next_item_modifier = button_apply_acceleration(get_action_data());
+    /* Non-wheel buttons post data 0 (no multiplier). On targets that pair
+     * a wheel with physical prev/next buttons (EROS Q) those still need
+     * to move one item per press. */
+    if (next_item_modifier < 1)
+        next_item_modifier = 1;
 #else
     static int next_item_modifier = 1;
     static int last_accel_tick = 0;

@@ -807,6 +807,10 @@ struct user_settings
     bool bt_link_logging; /* capture the BT link log to /.rockbox/bt_link.log */
 #endif
 
+#if defined(HAVE_WHEEL_ACCELERATION) && (CONFIG_KEYPAD == EROSQ_PAD)
+    int wheel_accel; /* scroll-wheel acceleration: 0=off 1=weak 2=moderate 3=strong */
+#endif
+
 #ifdef HAVE_SPEAKER
     int speaker_mode; /* 0: off, 1: on, 2: auto (only if headphone detection) */
 #endif /* HAVE_SPEAKER */

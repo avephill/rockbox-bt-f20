@@ -77,6 +77,54 @@ signed char enc_state[] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0};
 volatile unsigned char enc_current_state = 0;
 volatile signed int enc_position = 0;
 
+#ifndef BOOTLOADER
+/* ---- wheel acceleration (HAVE_WHEEL_ACCELERATION) ----
+ *
+ * A decaying activity counter tracks how energetically the wheel is being
+ * spun: each detent adds WHEEL_ACCEL_INC, each 10 ms button poll subtracts
+ * 1. Sustained fast spinning drives the counter toward WHEEL_ACCEL_MAX;
+ * slow clicking decays back to ~0 between detents. The list-step
+ * multiplier posted with each BUTTON_SCROLL_* event is the counter value
+ * *before* this detent's increment (so an isolated click is always
+ * exactly 1 item), shifted and capped per the user's "Wheel Acceleration"
+ * setting. The multiplier rides in button-data bits 24..30, bit 31 clear
+ * — button_apply_acceleration() returns it as-is (the e200v2 scheme; the
+ * iPod velocity curve is only for data with bit 31 set). */
+#define WHEEL_ACCEL_INC 8
+#define WHEEL_ACCEL_MAX 64
+static int wheel_accel;
+static int wheel_accel_shift = 2;  /* multiplier = counter >> shift */
+static int wheel_delta_cap   = 8;  /* ...clamped to this many items */
+
+/* Strength levels for the "Wheel Acceleration" setting:
+ * 0=off, 1=weak (max x4), 2=moderate (max x8), 3=strong (max x16). */
+void button_wheel_set_accel(int level)
+{
+    switch(level) {
+    case 0:  wheel_accel_shift = 2; wheel_delta_cap = 1;  break;
+    case 1:  wheel_accel_shift = 3; wheel_delta_cap = 4;  break;
+    case 2:  wheel_accel_shift = 2; wheel_delta_cap = 8;  break;
+    default: wheel_accel_shift = 1; wheel_delta_cap = 16; break;
+    }
+}
+
+/* Compute this event's button data and charge the counter. `steps` is how
+ * many detents accumulated since the last poll (>= 1) — a fast spin can
+ * land several inside one 10 ms poll window; folding them all in keeps
+ * that energy instead of losing it to the one-event-per-poll bottleneck. */
+static unsigned wheel_accel_data(int steps)
+{
+    int delta = wheel_accel >> wheel_accel_shift;
+    if (delta < 1) delta = 1;
+    if (delta > wheel_delta_cap) delta = wheel_delta_cap;
+    wheel_accel += WHEEL_ACCEL_INC * steps;
+    if (wheel_accel > WHEEL_ACCEL_MAX) wheel_accel = WHEEL_ACCEL_MAX;
+    return (unsigned)delta << 24;
+}
+#else
+static unsigned wheel_accel_data(int steps) { (void)steps; return 1u << 24; }
+#endif
+
 /* Value of headphone detect register */
 static uint8_t hp_detect_reg = 0x00;
 static uint8_t hp_detect_reg_old = 0x00;
@@ -338,12 +386,17 @@ int button_read_device(void)
     }
 #endif
 
+#ifndef BOOTLOADER
+    /* wheel-acceleration decay: one unit per 10 ms poll */
+    if (wheel_accel > 0)
+        wheel_accel--;
+#endif
     /* check encoder - from testing, each indent is 2 state changes or so */
     if (enc_position > 1)
     {
         /* need to use queue_post() in order to do BUTTON_SCROLL_*,
          * Rockbox treats these buttons differently. */
-        button_queue_post(BUTTON_SCROLL_FWD, 0);
+        button_queue_post(BUTTON_SCROLL_FWD, wheel_accel_data(enc_position / 2));
         enc_position = 0;
         reset_poweroff_timer();
         backlight_on();
@@ -352,7 +405,7 @@ int button_read_device(void)
     {
         /* need to use queue_post() in order to do BUTTON_SCROLL_*,
          * Rockbox treats these buttons differently. */
-        button_queue_post(BUTTON_SCROLL_BACK, 0);
+        button_queue_post(BUTTON_SCROLL_BACK, wheel_accel_data(-enc_position / 2));
         enc_position = 0;
         reset_poweroff_timer();
         backlight_on();
