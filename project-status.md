@@ -1,6 +1,6 @@
 # Rockbox erosqnative — Bluetooth A2DP Source
 
-**Last updated**: 2026-07-14 (AAC negotiation hardening: sink-caps intersection, SBC fallback on reject/timeout — fixes Redmi silent-playback)
+**Last updated**: 2026-07-22 (C13 — outdoor RF robustness: adaptive AAC bitrate, RSSI/LQ link probe, stall watchdog)
 **Branch**: `bt-aac`
 **Target**: Surfans F20 DAP (Rockbox `erosqnative`, Ingenic X1000 SoC, MIPS32 bare-metal, HW4 revision)
 **Combo chip**: BCM4343A1 (WiFi + Bluetooth) — only BT brought up.
@@ -27,8 +27,11 @@ End-to-end Bluetooth audio at full quality: scan for nearby devices, pick one, p
 | AVRCP target (sink button play/pause/next/prev) | working (C11) |
 | AAC-LC source codec via vo-aacenc, LATM framing | working (C12) |
 | AAC bitrate setting (128/96/64 kbps) | working (C12) |
-| AAC→SBC fallback for sinks with unusable/refused AAC | implemented 2026-07-14, needs Redmi verification |
+| AAC→SBC fallback for sinks with unusable/refused AAC | working per user report 2026-07-22 (C12b firmware verified on hardware; `sel SBC` itself still never observed in a log) |
 | Link-event logging to /.rockbox/bt_link.log (toggle) | working (C12) |
+| Adaptive AAC bitrate (downshift on RF distress, auto-recover) | implemented 2026-07-22 (C13), needs outdoor-walk verification |
+| Link probe: TX power + RSSI + link quality every 4 s | implemented 2026-07-22 (C13) |
+| Stall watchdog (frozen link → auto reconnect) | implemented 2026-07-22 (C13), needs outdoor-walk verification |
 
 Where it lives in the UI:
 - **Front-page `Bluetooth`** entry on the root menu — primary path. The parent menu shows **Devices / Audio quality / Link logging / Auto-connect / Turn Bluetooth off**, each with its value inline (DYNTEXT items routing through `option_screen` for persistence).
@@ -58,7 +61,8 @@ Pairing additional devices: open the BT menu → tap **MENU** to scan → pick t
 | C11 v2 | **AVRCP target follow-ups (optional polish).** (a) Playback-status notifications back to the sink (`avrcp_target_set_playback_status` + `support_event(NOTIFICATION_PLAYBACK_STATUS_CHANGED)`) so non-Apple controllers see proper PLAY/PAUSE alternation. Not needed for BFP since the toggle in v1 handles it; (b) AVRCP 1.4 metadata (`GetElementAttributes`) — only earns its weight on sinks with displays or car-display readouts; (c) absolute volume sync (bud volume up/down adjusts source volume). All independent of v1. |
 | ~~C12~~ | ~~AAC source codec.~~ **Done 2026-06-08** — AAC-LC via vo-aacenc (fixed-point, static 64 KB arena, no libm/malloc), LATM(MCP1) framing (gotcha 29), explicit codec selection preferring AAC with SBC fallback, 128/96/64 kbps "Audio quality" setting, DH3 slot cap + stay-master, link-event logging to `/.rockbox/bt_link.log`, read-only TX-power probe (result: pinned at 12 dBm ceiling — frame size is the only remaining robustness lever). Verified on Beats Fit Pro: cleaner than SBC while walking. See "What changed since 2026-05-03". |
 | ~~C12b~~ | ~~AAC negotiation hardening.~~ **Done 2026-07-14** — diagnosed the Redmi "shows playing but silent" bug from the on-device link log and fixed the negotiation layer: sink-caps intersection before choosing AAC, `A2DP_SUBEVENT_COMMAND_REJECTED` handling + 4 s config watchdog with disconnect-reconnect SBC fallback, AAC encoder rebuild on resume-after-suspend, oversize-frame-vs-MTU drop+log, 44.1-only AAC caps. Gotchas 29–35. **Needs on-hardware verification against the Redmi** (expected: `AAC caps …` + either AAC working or `sel SBC` in the log). |
-| next | **Redmi verification pass** — reconnect the Redmi speaker, confirm it either streams AAC or falls back to SBC with audio, and pull `/.rockbox/bt_link.log` to see which of gotcha 31's failure modes it actually exhibits (reject vs. timeout vs. close). |
+| ~~C13~~ | ~~Outdoor RF robustness.~~ **Done 2026-07-22** — analysis of the outdoor-walk link log (constant 60–200 ms send stalls, `slots max=1` LM downgrades, one 21 s frozen stretch with the ACL alive) + hardware research concluded the F20 side is the RF bottleneck (BCM4343A1 combo chip, single shared antenna, generic module patchram; TX pinned at its 12 dBm ceiling — confirmed live every probe round) and outdoors lacks the indoor multipath that fills body-shadow nulls. Three levers landed, one commit each: (1) **adaptive AAC bitrate** — 3 send gaps >200 ms in 10 s drop the encode rate a ladder step (128→96→64 k) mid-stream with no renegotiation (gotcha 36), 60 s clean recovers one step; (2) **link probe** — the txpow probe now chains Read_RSSI + Read_Link_Quality, logging `link tx=12/12 rssi=R lq=Q` (gotcha 38); (3) **stall watchdog** — ≥5 s with no successful media send → pending-switch + `gap_disconnect` → auto-reconnect (gotcha 37), rate-limited to one kick/30 s. Gotchas 36–38. |
+| next | **Outdoor walk verification** — same conditions as the mid-July outdoor log, Beats Fit Pro, link logging on. Expect `AAC rate 128000 -> 96000 (gaps)` shifts tracking `rssi`/`lq` dips, `stall N ms -> re-conn` replacing the multi-second freezes, and audibly fewer/shorter dropouts. Also confirm the `... N dropped ...` ring-overflow lines don't swallow the new signals (bump the ring if they do). |
 
 ## Architecture
 
@@ -373,6 +377,12 @@ These are the non-obvious facts that, if missed, lose hours.
 
 35. **Never advertise a PCM rate the audio path can't deliver.** On an incoming connection (every speaker auto-reconnect) the sink is the AVDTP initiator and may configure our endpoint at any advertised rate. We advertised 44.1+48 kHz AAC while `bt_samprs` is `{44100}` — a 48 kHz pick would label 44.1 samples as 48 kHz: ~9% pitch shift plus a consume-rate mismatch. AAC caps now advertise 44.1 only.
 
+36. **The negotiated AAC `bit_rate` is a *maximum*, so the encoder can be swapped to a lower rate mid-stream with zero renegotiation.** LATM AudioMuxElements are self-contained (no rate field anywhere), so the sink just decodes whatever arrives. This is what Apple sources do on marginal RF, and it's the basis of the C13 adaptive bitrate: rebuild vo-aacenc at an idle point between frames (audio_tick, payload empty). vo-aacenc re-primes over ~2 frames (~46 ms) after a rebuild — the sink's jitter buffer rides it out. Corollary: at 64 kbps the ~190 B average frame fits a single DH3 baseband packet instead of spanning three, so a downshift buys margin twice (less airtime *and* fewer fragments to lose).
+
+37. **Link supervision will not rescue a frozen media path.** Supervision only needs *some* LMP traffic to get through; a retransmit-wedged ACL can freeze media near-indefinitely without disconnecting (21 s send gap observed with the link alive throughout). Detect it host-side (no successful media send for N s → reconnect) and tear down with `gap_disconnect`, **not** `a2dp_source_disconnect` — the AVDTP close handshake would ride the same wedged ACL, while an HCI disconnect completes locally even if the peer never answers the LMP detach.
+
+38. **BR/EDR `Read_RSSI` is not absolute dBm by spec** — it's dB relative to the "golden receive range" (0 = inside it, negative = below), though BCM controllers commonly report something close to real dBm. `Read_Link_Quality` is vendor-scaled 0–255, higher = better (BCM derives it from CRC/retransmit rate). Treat both as trend data, not calibrated measurements; `lq` sagging while `tx` stays 12/12 = the link is out of margin with nothing left to give.
+
 ## File map
 
 ### New / heavily modified for BT
@@ -434,6 +444,24 @@ sync
 Device mounts at `/run/media/avery/F20/` (FAT32). Run `make zip` so the toolchain produces `rockbox.zip` containing the full `.rockbox/` tree; unzipping over the device replaces all firmware artifacts atomically.
 
 To re-extract the BCM patchram from a fresh stock firmware dump, see the artifacts list at the bottom of this file.
+
+## What changed since 2026-07-14 (C13 — outdoor RF robustness, 2026-07-22)
+
+Driven by the "works indoors, nearly unusable walking outdoors" BFP problem. The diagnosis, from the outdoor-walk link log + hardware research:
+
+- **Physics**: indoors, wall/ceiling reflections fill the null when the body blocks the F20→bud path; outdoors there are no reflectors, so a body-shadowed path just loses 20–40 dB. Everyone's earbuds degrade outdoors — the F20 falls off a cliff because it has far less link margin than a phone.
+- **Hardware**: the F20 is the weak end both directions. BCM4343A1 = BT 4.1-era WiFi/BT combo chip, **single shared antenna**, no-name module (`BAW_NM372SM`), *generic* patchram (the `.hcd` version string says so — generic RF calibration, not per-board). The BFP is Class 1 BT 5.0 on Apple H1 — not the problem. Stock-firmware Surfans reviews report the same outdoor spottiness, so this predates our stack. TX power is pinned 12/12 dBm (probe confirms every 4 s) — **no headroom lever exists**.
+- **Log signatures**: send-gap p50 70 ms / p99 480 ms during the walk; `slots max=1` (LM downgrading to 27-byte 1-slot packets = throughput collapse); stalls of 1.7 s / 7.9 s / **21 s with the ACL alive** (supervision doesn't care about media — gotcha 37). Also: the ring log dropped thousands of lines between flushes on the walk sessions — enlarge the ring if outdoor diagnosis continues.
+
+Levers landed (one commit each):
+
+- **Adaptive AAC bitrate** (`bt-pcm-sink.c`) — 3 send gaps >200 ms inside 10 s → downshift one ladder step (128→96→64 k) mid-stream, no renegotiation (gotcha 36); 60 s with no distress → recover one step toward the negotiated ceiling. Adapted rate survives suspend/resume; fresh negotiation resets it. Log: `AAC rate X -> Y (gaps|clean)`.
+- **Link probe** (`bt-service.c`) — the TX-power probe now chains `Read_RSSI` + `Read_Link_Quality`; one `link tx=12/12 rssi=R lq=Q` line per 4 s round replaces the old `txpow` line (gotcha 38). This is the margin data for tuning the adaptive thresholds.
+- **Stall watchdog** (`bt-service.c` + `bt_pcm_sink_stall_ms()`) — ≥5 s with no successful media send while streaming → pending-switch to the same device + `gap_disconnect` (HCI-level on purpose — gotcha 37) → auto-reconnect. One kick per 30 s max. Log: `stall N ms -> re-conn`. Turns a 20 s freeze into a ~2–3 s blip.
+
+Ruled out (again/for good): TX power vendor hacks (at ceiling), EDR re-enable (outdoors is a *worse* SNR regime than the body-null tests that killed it), AFH tricks (WiFi interference is an indoor problem; outdoors is pure path loss). The no-code lever that remains: carry the F20 high on the body, same side as the connected bud — a pants pocket outdoors is 50+ cm of tissue with no reflections, beyond what any firmware can fix.
+
+Also verified this session (user report, 2026-07-22): the C12b firmware works end-to-end on hardware; the caps-intersection log line fires. `sel SBC` has still never appeared in any log — the SBC selection path remains hardware-unexercised.
 
 ## What changed since 2026-06-08 (C12b — AAC negotiation hardening, 2026-07-14)
 
