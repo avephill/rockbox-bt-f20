@@ -18,12 +18,18 @@
 #include "file.h"
 #include "bt-link-log.h"
 
-#define LOG_CAP 256   /* must be a power of two */
+/* 2048 x 64 B = 128 KB of ring — cheap on this target, and sized so a
+ * full outdoor walk between pause-flushes fits without dropping (the
+ * 256-entry ring lost up to ~1700 lines per walk session, which kept
+ * costing us the interesting stretch of every diagnosis). Must be a
+ * power of two. */
+#define LOG_CAP 2048
 
 /* Cap the on-card log so append-across-reboots can't fill the card over
  * months. When the file passes this, the next dump rotates it (truncate +
- * fresh "=== log start ===" header). */
-#define LOG_MAX_BYTES (256 * 1024)
+ * fresh "=== log start ===" header). Sized to hold a handful of full-ring
+ * dumps (a full ring is ~140 KB on card). */
+#define LOG_MAX_BYTES (1024 * 1024)
 
 struct entry {
     uint32_t ts_ms;

@@ -164,13 +164,24 @@ static struct {
 #define AAC_ADAPT_GAP_MS       200   /* a send gap this long counts as distress */
 #define AAC_ADAPT_WINDOW_MS  10000   /* ...when it lands within this window   */
 #define AAC_ADAPT_TRIGGER        3   /* this many distress gaps -> downshift  */
-#define AAC_ADAPT_RECOVER_MS 60000   /* clean this long -> upshift one step   */
+#define AAC_ADAPT_RECOVER_MS 60000   /* base clean period before an upshift   */
+/* Upshift backoff: an upshift is a *probe* — if it gets knocked back down
+ * within the window below, conditions hadn't really improved, so the next
+ * probe waits twice as long (doubling up to the ceiling). Stops the
+ * 60 s up/down cycle in sustained marginal conditions (pants pocket on a
+ * walk: verified log showed 96->128 "clean" at t=317 punished by a fresh
+ * distress episode at t=370). A downshift with NO recent probe is a new
+ * distress episode and resets the backoff to the base period. */
+#define AAC_ADAPT_PROBE_WINDOW_MS (2 * 60000)
+#define AAC_ADAPT_RECOVER_MAX_MS  (8 * 60000)
 static uint32_t s_aac_cur_bitrate;    /* current encode rate (<= negotiated) */
 static bool     s_aac_rate_pending;   /* swap encoder at next idle point */
 static int      s_adapt_gap_count;
 static uint32_t s_adapt_win_start;    /* start of current distress window (0 = none) */
 static uint32_t s_adapt_last_bad_ms;  /* last distress gap (0 = never) */
 static uint32_t s_adapt_last_shift_ms;/* last rate shift / stream start */
+static uint32_t s_adapt_recover_ms = AAC_ADAPT_RECOVER_MS; /* current backoff */
+static uint32_t s_adapt_last_up_ms;   /* last upshift (0 = none yet) */
 
 /* ---- audio pacing ----
  *
@@ -321,6 +332,17 @@ static void aac_adapt_note_gap(uint32_t now, uint32_t dt)
     s_adapt_win_start = 0;
     uint32_t next = aac_adapt_step_down(s_aac_cur_bitrate);
     if(next == s_aac_cur_bitrate) return;
+    /* probe-failure backoff: see comment at AAC_ADAPT_PROBE_WINDOW_MS */
+    if(s_adapt_last_up_ms != 0
+       && now - s_adapt_last_up_ms < AAC_ADAPT_PROBE_WINDOW_MS) {
+        s_adapt_recover_ms *= 2;
+        if(s_adapt_recover_ms > AAC_ADAPT_RECOVER_MAX_MS)
+            s_adapt_recover_ms = AAC_ADAPT_RECOVER_MAX_MS;
+        bt_link_logf("AAC probe fail, next in %lus",
+                     (unsigned long)(s_adapt_recover_ms / 1000));
+    } else {
+        s_adapt_recover_ms = AAC_ADAPT_RECOVER_MS;
+    }
     bt_link_logf("AAC rate %lu -> %lu (gaps)",
                  (unsigned long)s_aac_cur_bitrate, (unsigned long)next);
     s_aac_cur_bitrate     = next;
@@ -333,9 +355,9 @@ static void aac_adapt_note_gap(uint32_t now, uint32_t dt)
 static void aac_adapt_maybe_recover(uint32_t now)
 {
     if(s_aac_rate_pending || s_aac_cur_bitrate >= s_aac_cfg.bit_rate) return;
-    if(now - s_adapt_last_bad_ms   < AAC_ADAPT_RECOVER_MS
+    if(now - s_adapt_last_bad_ms   < s_adapt_recover_ms
        && s_adapt_last_bad_ms != 0) return;
-    if(now - s_adapt_last_shift_ms < AAC_ADAPT_RECOVER_MS) return;
+    if(now - s_adapt_last_shift_ms < s_adapt_recover_ms) return;
     uint32_t next = aac_adapt_step_up(s_aac_cur_bitrate, s_aac_cfg.bit_rate);
     if(next == s_aac_cur_bitrate) return;
     bt_link_logf("AAC rate %lu -> %lu (clean)",
@@ -343,6 +365,7 @@ static void aac_adapt_maybe_recover(uint32_t now)
     s_aac_cur_bitrate     = next;
     s_aac_rate_pending    = true;
     s_adapt_last_shift_ms = now;
+    s_adapt_last_up_ms    = now;
 }
 
 /* Common post-send bookkeeping: stretch detector + log non-zero rc.
@@ -581,9 +604,12 @@ void bt_pcm_sink_set_aac_config(uint32_t sample_rate, uint8_t channels,
     s_aac_cfg.channels    = channels;
     s_aac_cfg.bit_rate    = bit_rate;
     s_aac_cfg.vbr         = vbr;
-    /* Fresh negotiation resets the adaptive rate to the new ceiling. */
+    /* Fresh negotiation resets the adaptive rate to the new ceiling,
+     * and the probe backoff with it. */
     s_aac_cur_bitrate     = bit_rate;
     s_aac_rate_pending    = false;
+    s_adapt_recover_ms    = AAC_ADAPT_RECOVER_MS;
+    s_adapt_last_up_ms    = 0;
     aac_encoder_setup();
 }
 
