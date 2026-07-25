@@ -35,6 +35,23 @@ another reason this tree is not upstreamable.
 | bluedroid SBC codec | `firmware/drivers/btstack/3rd-party/bluedroid/` | Apache-2.0 | (bundled with BTstack) |
 | vo-aacenc (AAC-LC encoder) | `firmware/drivers/btstack/3rd-party/voaac/` | Apache-2.0 | https://github.com/mstorsjo/vo-aacenc — pinned commit in `vendor-voaac.sh` |
 | FAAC (unused encoder path) | not committed | LGPL-2.1+ | https://github.com/knik0/faac — fetched by `vendor-faac.sh` |
+| BCM4343A1 BT patchram | `BCM4343A1.hcd` (repo root) | proprietary (Broadcom/Cypress/Infineon) | extracted from Surfans F20 stock firmware |
+
+## The Bluetooth firmware blob (`BCM4343A1.hcd`)
+
+The BCM4343A1 combo chip boots with minimal ROM firmware and requires a
+vendor "patchram" upload before Bluetooth works. `BCM4343A1.hcd` (build id
+`BAW_NM372SM_Generic_BCM43438A1_UART_26MHz_wlbga_eLG_lite_BT42-0122`) was
+**extracted from the Surfans F20's stock firmware image** — it is Broadcom/
+Cypress (now Infineon) proprietary code, not open source, and is included
+here in the same spirit as the Broadcom/Cypress `.hcd` files shipped in
+`linux-firmware`: solely so the radio already soldered into your player can
+function. It is uploaded to the chip's RAM at runtime and never modified.
+
+If you prefer not to use the bundled copy, extract it from your own device's
+stock firmware update package and place it at `/.rockbox/BCM4343A1.hcd`
+yourself — the loader (`bt-bcm-patchram.c`) only cares that the file is
+there.
 
 ## Updating the vendored dependencies
 
